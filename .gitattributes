@@ -1,0 +1,8 @@
+# Goldens and fixtures are compared byte-for-byte against bytes generated in
+# memory, and a source file's own bytes are its BLAKE3 fingerprint. A checkout
+# that rewrites line endings would change both, so the working tree stays LF on
+# every platform rather than following the local Git default.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
