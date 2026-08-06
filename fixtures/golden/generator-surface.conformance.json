@@ -1,0 +1,755 @@
+{
+  "cases": [
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 41,
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "ZZZZZZZZZ",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "positive",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "schema-valid:16980825849178281752",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 41,
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "ZZZZZZZZZ",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "negative",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "omit-required-body:body.fixed",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 0,
+        "digits": "777",
+        "either": true,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "77"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "77",
+          "b": 0
+        },
+        "multi": "ZZZZ",
+        "nested": {
+          "p": "77",
+          "r": false
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "ZZZZZ"
+        },
+        "sampled": "77",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "aa",
+          "bb",
+          "cc"
+        ],
+        "union": "x",
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "positive",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "ZZZZ"
+        }
+      ],
+      "method": "POST",
+      "strategy": "schema-valid:17269585803613446119",
+      "target": "https://api.example.test/surface/aaa?count=40&kind=gamma&verbose=false"
+    },
+    {
+      "body": {
+        "dated": "2026-08-05",
+        "defaulted": 41,
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "ZZZZZZZZZ",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "negative",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "omit-required-body:body.choice",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "alpha",
+        "dated": "2026-08-05",
+        "defaulted": 0,
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "77"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "77",
+          "b": 0
+        },
+        "multi": 0,
+        "nested": {
+          "p": "77",
+          "r": false
+        },
+        "nothing": null,
+        "pair": [
+          9,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "aa"
+        },
+        "sampled": "77",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "ee",
+          "cc"
+        ],
+        "union": "y",
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "positive",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "aa"
+        }
+      ],
+      "method": "POST",
+      "strategy": "schema-valid:6020769619100638856",
+      "target": "https://api.example.test/surface/ZZZZZZ?count=5&kind=gamma&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 41,
+        "digits": "777",
+        "either": false,
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "ZZZZZZZZZ",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "negative",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "omit-required-body:body.exampled",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 0,
+        "digits": "777",
+        "either": true,
+        "exampled": "ZZZZZZZZZ",
+        "fixed": "immutable",
+        "flag": false,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "ZZ",
+          "b": 5
+        },
+        "multi": "a",
+        "nested": {
+          "p": "ZZZZ",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          9
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "aa"
+        },
+        "sampled": "a",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "aa",
+          "bb",
+          "cc"
+        ],
+        "union": "y",
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "positive",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "ZZZZ"
+        }
+      ],
+      "method": "POST",
+      "strategy": "schema-valid:6870876058134841981",
+      "target": "https://api.example.test/surface/7777?count=5&kind=beta&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "ZZZZZZZZZ",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "negative",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "omit-required-body:body.defaulted",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "alpha",
+        "dated": "2026-08-05",
+        "defaulted": 99,
+        "digits": "777",
+        "either": null,
+        "exampled": "from-example",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "77",
+          "b": 5
+        },
+        "multi": 0,
+        "nested": {
+          "p": "ZZZZ",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          9,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "one",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "dd",
+          "cc",
+          "aa"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "positive",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "schema-valid:12474329797001005402",
+      "target": "https://api.example.test/surface/ZZZZZZ?count=40&kind=gamma&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 41,
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "union": 1,
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "negative",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "omit-required-body:body.sampled",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "alpha",
+        "dated": "2026-08-05",
+        "defaulted": 0,
+        "digits": "777",
+        "either": null,
+        "exampled": "from-example",
+        "fixed": "immutable",
+        "flag": false,
+        "guarded": {
+          "visible": "77"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": "ZZZZ",
+        "nested": {
+          "p": "77",
+          "q": 9
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "ZZZZZ"
+        },
+        "sampled": "a",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "aa",
+          "ee"
+        ],
+        "union": "y",
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "positive",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "ZZZZ"
+        }
+      ],
+      "method": "POST",
+      "strategy": "schema-valid:14407053272291851536",
+      "target": "https://api.example.test/surface/7777?count=40&kind=gamma&verbose=true"
+    },
+    {
+      "body": {
+        "choice": "gamma",
+        "dated": "2026-08-05",
+        "defaulted": 41,
+        "digits": "777",
+        "either": false,
+        "exampled": "77",
+        "fixed": "immutable",
+        "flag": true,
+        "guarded": {
+          "visible": "ZZZ"
+        },
+        "host": "example.test",
+        "ident": "00000000-0000-4000-8000-000000000001",
+        "link": "https://example.test/resource",
+        "lower": "aa",
+        "mail": "kahea@example.test",
+        "merged": {
+          "a": "a",
+          "b": 0
+        },
+        "multi": 9,
+        "nested": {
+          "p": "a",
+          "q": 0
+        },
+        "nothing": null,
+        "pair": [
+          0,
+          0
+        ],
+        "raw": "a2FoZWE=",
+        "reffed": {
+          "label": "777"
+        },
+        "sampled": "ZZZZZZZZZ",
+        "stamped": "2026-08-05T00:00:00Z",
+        "tags": [
+          "cc",
+          "bb"
+        ],
+        "upper": "AA",
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::1"
+      },
+      "generation": "negative",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Channel",
+          "value": "777"
+        }
+      ],
+      "method": "POST",
+      "strategy": "omit-required-body:body.union",
+      "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+    }
+  ],
+  "fingerprint": "b3:ccc65c19814fe0e9000ca64ade139272cb49acba17e0e42d2e74e01d2d30080d",
+  "requested_cases": 12,
+  "required_grants": [
+    "conformance:execute:12",
+    "conformance:negative",
+    "http:POST",
+    "net:api.example.test:443"
+  ],
+  "seed": 42
+}

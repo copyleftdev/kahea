@@ -1,0 +1,22 @@
+[package]
+name = "kahea"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kahea"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+kahea-conformance = { path = "../kahea-conformance" }
+kahea-core = { path = "../kahea-core" }
+kahea-evidence = { path = "../kahea-evidence" }
+kahea-exec = { path = "../kahea-exec" }
+kahea-ingest = { path = "../kahea-ingest" }
+kahea-mcp = { path = "../kahea-mcp" }
+kahea-plan = { path = "../kahea-plan" }
+kahea-workflow = { path = "../kahea-workflow" }
+serde_json.workspace = true

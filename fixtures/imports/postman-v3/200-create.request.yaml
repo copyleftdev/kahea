@@ -1,0 +1,13 @@
+type: http
+name: Create widget
+order: 200
+request:
+  method: POST
+  url: https://api.example.test/widgets
+  headers:
+    Content-Type: application/json
+  body:
+    raw: '{"name":"precision"}'
+    options:
+      raw:
+        language: json

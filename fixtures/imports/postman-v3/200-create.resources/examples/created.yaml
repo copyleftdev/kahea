@@ -1,0 +1,7 @@
+type: http-example
+name: Created
+response:
+  status: 201
+  headers:
+    Content-Type: application/json
+  body: '{"id":"widget-1"}'

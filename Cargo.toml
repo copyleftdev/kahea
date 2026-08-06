@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/kahea-core",
+  "crates/kahea-conformance",
+  "crates/kahea-ingest",
+  "crates/kahea-test-server",
+  "crates/kahea-plan",
+  "crates/kahea-evidence",
+  "crates/kahea-exec",
+  "crates/kahea-mcp",
+  "crates/kahea-workflow",
+  "crates/kahea",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/copyleftdev/kahea"
+
+[workspace.dependencies]
+blake3 = "1.8.2"
+base64 = "0.22.1"
+clap = { version = "4.5.45", features = ["derive"] }
+schemars = { version = "1.0.4", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+thiserror = "2.0.15"
+toml = "1.1.4"
+percent-encoding = "2.3.2"
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "http2", "gzip", "brotli", "deflate"] }
+serde_json_path = { version = "0.7.2", default-features = false }
+shell-words = "1.1.1"
+sxd-document = "0.3.2"
+sxd-xpath = "0.4.2"
+url = "2.5.7"
+yaml-rust2 = { version = "0.11.0", default-features = false }
+zstd = "0.13.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

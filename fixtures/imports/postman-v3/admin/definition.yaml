@@ -1,0 +1,5 @@
+type: folder
+name: Admin
+variables:
+  - key: adminBase
+    value: https://api.example.test/admin

@@ -1,0 +1,18 @@
+[package]
+name = "kahea-exec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+kahea-core = { path = "../kahea-core" }
+kahea-evidence = { path = "../kahea-evidence" }
+reqwest.workspace = true
+serde_json.workspace = true
+serde_json_path.workspace = true
+sxd-document.workspace = true
+sxd-xpath.workspace = true
+thiserror.workspace = true
+url.workspace = true

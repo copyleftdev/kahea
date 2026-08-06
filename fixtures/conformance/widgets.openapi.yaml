@@ -1,0 +1,43 @@
+openapi: 3.1.0
+info:
+  title: Kāhea conformance fixture
+  version: 1.0.0
+servers:
+  - url: https://api.example.test
+paths:
+  /widgets/{id}:
+    post:
+      operationId: updateWidget
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 8 }
+        - name: verbose
+          in: query
+          required: true
+          schema: { type: boolean }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, count]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 8 }
+                count: { type: integer, minimum: 0, maximum: 10 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input rejected
+          content:
+            application/json:
+              schema:
+                type: object

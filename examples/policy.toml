@@ -1,0 +1,6 @@
+allowed_hosts = ["sandbox.example.com", "api.example.com"]
+denied_hosts = ["metadata.google.internal"]
+max_request_bytes = 16777216
+require_production_write_approval = true
+sensitive_headers = ["X-Customer-Token"]
+redact_response_json_pointers = ["/customer/email", "/payment/card"]

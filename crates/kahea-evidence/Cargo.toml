@@ -1,0 +1,18 @@
+[package]
+name = "kahea-evidence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+kahea-core = { path = "../kahea-core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_json_path.workspace = true
+sxd-document.workspace = true
+sxd-xpath.workspace = true
+thiserror.workspace = true
+zstd.workspace = true

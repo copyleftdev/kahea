@@ -1,0 +1,43 @@
+{
+  "info": {
+    "name": "Kāhea Postman 2.1 fixture",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://api.example.test" }
+  ],
+  "item": [
+    {
+      "name": "Get health",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health",
+        "header": [{ "key": "Accept", "value": "application/json" }]
+      },
+      "event": [
+        { "listen": "test", "script": { "exec": ["pm.response.to.have.status(200);"] } }
+      ]
+    },
+    {
+      "name": "Create widget",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/widgets?notify=true",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"name\":\"precision\"}",
+          "options": { "raw": { "language": "json" } }
+        }
+      },
+      "response": [
+        {
+          "name": "Created",
+          "code": 201,
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": "{\"id\":\"widget-1\"}"
+        }
+      ]
+    }
+  ]
+}

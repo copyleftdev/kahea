@@ -1,0 +1,3 @@
+### Lookup
+GET https://api.example.test/widgets/widget-1
+Accept: application/json

@@ -1,0 +1,22 @@
+version = 1
+
+[defaults]
+source = "openapi.yaml"
+server = "sandbox"
+auth = "billing-sandbox"
+policy = "policy.toml"
+
+[servers.sandbox]
+url = "https://sandbox.example.com"
+classification = "non-production"
+
+[servers.production]
+url = "https://api.example.com"
+classification = "production"
+
+[auth.billing-sandbox]
+type = "bearer"
+token = "secret://billing/sandbox"
+
+[risk]
+"POST /v1/reports/preview" = "read"

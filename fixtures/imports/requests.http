@@ -1,0 +1,9 @@
+### Health
+GET https://api.example.test/health
+Accept: application/json
+
+### Create
+POST https://api.example.test/widgets
+Content-Type: application/json
+
+{"name":"fixture"}

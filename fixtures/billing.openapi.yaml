@@ -1,0 +1,39 @@
+openapi: 3.1.0
+info:
+  title: Kāhea Billing Fixture
+  version: 1.0.0
+servers:
+  - url: https://sandbox.example.test
+paths:
+  /v1/invoices:
+    post:
+      operationId: createInvoice
+      summary: Create an invoice
+      tags: [invoices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, amount]
+              properties:
+                customer_id: { type: string }
+                amount: { type: number, minimum: 0 }
+      responses:
+        "201":
+          description: Invoice created
+  /v1/invoices/{id}:
+    get:
+      operationId: getInvoice
+      summary: Get one invoice
+      tags: [invoices]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invoice
+

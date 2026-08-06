@@ -1,0 +1,16 @@
+[package]
+name = "kahea-workflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kahea-core = { path = "../kahea-core" }
+kahea-evidence = { path = "../kahea-evidence" }
+kahea-exec = { path = "../kahea-exec" }
+kahea-ingest = { path = "../kahea-ingest" }
+kahea-plan = { path = "../kahea-plan" }
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true

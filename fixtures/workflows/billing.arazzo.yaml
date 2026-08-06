@@ -1,0 +1,45 @@
+arazzo: 1.1.0
+info:
+  title: Billing create-and-read fixture
+  version: 1.0.0
+sourceDescriptions:
+  - name: billing
+    url: ../billing.openapi.yaml
+    type: openapi
+workflows:
+  - workflowId: createAndReadInvoice
+    inputs:
+      type: object
+      required: [customer_id, amount]
+      properties:
+        customer_id: { type: string }
+        amount: { type: number }
+    steps:
+      - stepId: create
+        operationId: $sourceDescriptions.billing.createInvoice
+        requestBody:
+          payload:
+            customer_id: $inputs.customer_id
+            amount: $inputs.amount
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          invoice_id: $response.body#/id
+      - stepId: read
+        operationPath: '{$sourceDescriptions.billing.url}#/paths/~1v1~1invoices~1{id}/get'
+        dependsOn: [create]
+        parameters:
+          - name: id
+            in: path
+            value: $steps.create.outputs.invoice_id
+        timeout: 5000
+        onFailure:
+          - name: retryTransient
+            type: retry
+            retryAfter: 0.25
+            retryLimit: 2
+            criteria:
+              - condition: $statusCode == 503
+        onSuccess:
+          - name: complete
+            type: end

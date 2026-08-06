@@ -1,0 +1,18 @@
+[package]
+name = "kahea-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+kahea-conformance = { path = "../kahea-conformance" }
+kahea-core = { path = "../kahea-core" }
+kahea-evidence = { path = "../kahea-evidence" }
+kahea-exec = { path = "../kahea-exec" }
+kahea-ingest = { path = "../kahea-ingest" }
+kahea-plan = { path = "../kahea-plan" }
+kahea-workflow = { path = "../kahea-workflow" }
+serde_json.workspace = true
+thiserror.workspace = true

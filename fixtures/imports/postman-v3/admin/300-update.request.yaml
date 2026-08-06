@@ -1,0 +1,13 @@
+type: http
+name: Update widget
+order: 300
+request:
+  method: PUT
+  url: "{{adminBase}}/widgets/widget-1"
+  headers:
+    Content-Type: application/json
+  body:
+    raw: '{"name":"nested-precision"}'
+    options:
+      raw:
+        language: json

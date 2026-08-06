@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Kāhea crest</title>
+  <desc id="desc">An interrupted circular crest expressing call, permission, and response.</desc>
+  <g fill="none" stroke="#171716" stroke-width="22" stroke-linecap="butt">
+    <path d="M248.32 36.13A220 220 0 0 0 248.32 475.87"/>
+    <path d="M263.68 36.13A220 220 0 0 1 263.68 475.87"/>
+  </g>
+  <path fill="#171716" d="M248 72.17A184 184 0 0 0 248 439.83V367.71A112 112 0 0 1 248 144.29Z"/>
+  <path fill="#171716" d="M264 144.29A112 112 0 0 1 264 367.71V325.50A70 70 0 0 0 264 186.50Z"/>
+  <path fill="#A9452E" d="M248 188C204 192 180 221 180 256s24 64 68 68c-31-13-46-38-46-68s15-55 46-68Z"/>
+  <path fill="#A9452E" d="M264 188c44 4 68 33 68 68s-24 64-68 68c31-13 46-38 46-68s-15-55-46-68Z"/>
+</svg>

@@ -1,0 +1,570 @@
+{
+  "baseline": {
+    "cases": [
+      {
+        "body": {
+          "choice": "beta",
+          "dated": "2026-08-05",
+          "defaulted": 41,
+          "digits": "777",
+          "either": false,
+          "exampled": "77",
+          "fixed": "immutable",
+          "flag": true,
+          "guarded": {
+            "visible": "ZZZ"
+          },
+          "host": "example.test",
+          "ident": "00000000-0000-4000-8000-000000000001",
+          "link": "https://example.test/resource",
+          "lower": "aa",
+          "mail": "kahea@example.test",
+          "merged": {
+            "a": "a",
+            "b": 0
+          },
+          "multi": 9,
+          "nested": {
+            "p": "pin"
+          },
+          "nothing": null,
+          "pair": [
+            0,
+            0
+          ],
+          "raw": "a2FoZWE=",
+          "reffed": {
+            "label": "fixed"
+          },
+          "sampled": "ZZZZZZZZZ",
+          "stamped": "2026-08-05T00:00:00Z",
+          "tags": [
+            "cc",
+            "bb"
+          ],
+          "union": 1,
+          "upper": "AA",
+          "v4": "192.0.2.1",
+          "v6": "2001:db8::1"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Channel",
+            "value": "777"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:16980825849178281752",
+        "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
+      },
+      {
+        "body": {
+          "choice": "beta",
+          "dated": "2026-08-05",
+          "defaulted": 0,
+          "digits": "777",
+          "either": true,
+          "exampled": "77",
+          "fixed": "immutable",
+          "flag": true,
+          "guarded": {
+            "visible": "77"
+          },
+          "host": "example.test",
+          "ident": "00000000-0000-4000-8000-000000000001",
+          "link": "https://example.test/resource",
+          "lower": "aa",
+          "mail": "kahea@example.test",
+          "merged": {
+            "a": "77",
+            "b": 0
+          },
+          "multi": "ZZZZ",
+          "nested": {
+            "p": "pin",
+            "r": false
+          },
+          "nothing": null,
+          "pair": [
+            0,
+            0
+          ],
+          "raw": "a2FoZWE=",
+          "reffed": {
+            "label": "fixed"
+          },
+          "sampled": "77",
+          "stamped": "2026-08-05T00:00:00Z",
+          "tags": [
+            "aa",
+            "bb",
+            "cc"
+          ],
+          "union": "x",
+          "upper": "AA",
+          "v4": "192.0.2.1",
+          "v6": "2001:db8::1"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Channel",
+            "value": "ZZZZ"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:17269585803613446119",
+        "target": "https://api.example.test/surface/aaa?count=40&kind=gamma&verbose=false"
+      },
+      {
+        "body": {
+          "choice": "beta",
+          "dated": "2026-08-05",
+          "defaulted": 0,
+          "digits": "777",
+          "either": false,
+          "exampled": "77",
+          "fixed": "immutable",
+          "flag": true,
+          "guarded": {
+            "visible": "77"
+          },
+          "host": "example.test",
+          "ident": "00000000-0000-4000-8000-000000000001",
+          "link": "https://example.test/resource",
+          "lower": "aa",
+          "mail": "kahea@example.test",
+          "merged": {
+            "a": "77",
+            "b": 0
+          },
+          "multi": 0,
+          "nested": {
+            "p": "pin",
+            "r": false
+          },
+          "nothing": null,
+          "pair": [
+            9,
+            0
+          ],
+          "raw": "a2FoZWE=",
+          "reffed": {
+            "label": "fixed"
+          },
+          "sampled": "77",
+          "stamped": "2026-08-05T00:00:00Z",
+          "tags": [
+            "ee",
+            "cc"
+          ],
+          "union": "y",
+          "upper": "AA",
+          "v4": "192.0.2.1",
+          "v6": "2001:db8::1"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Channel",
+            "value": "aa"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:6020769619100638856",
+        "target": "https://api.example.test/surface/ZZZZZZ?count=5&kind=gamma&verbose=true"
+      },
+      {
+        "body": {
+          "choice": "beta",
+          "dated": "2026-08-05",
+          "defaulted": 0,
+          "digits": "777",
+          "either": true,
+          "exampled": "ZZZZZZZZZ",
+          "fixed": "immutable",
+          "flag": false,
+          "guarded": {
+            "visible": "ZZZ"
+          },
+          "host": "example.test",
+          "ident": "00000000-0000-4000-8000-000000000001",
+          "link": "https://example.test/resource",
+          "lower": "aa",
+          "mail": "kahea@example.test",
+          "merged": {
+            "a": "ZZ",
+            "b": 5
+          },
+          "multi": "a",
+          "nested": {
+            "p": "pin"
+          },
+          "nothing": null,
+          "pair": [
+            0,
+            9
+          ],
+          "raw": "a2FoZWE=",
+          "reffed": {
+            "label": "fixed"
+          },
+          "sampled": "a",
+          "stamped": "2026-08-05T00:00:00Z",
+          "tags": [
+            "aa",
+            "bb",
+            "cc"
+          ],
+          "union": "y",
+          "upper": "AA",
+          "v4": "192.0.2.1",
+          "v6": "2001:db8::1"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Channel",
+            "value": "ZZZZ"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:6870876058134841981",
+        "target": "https://api.example.test/surface/7777?count=5&kind=beta&verbose=true"
+      },
+      {
+        "body": {
+          "choice": "beta",
+          "dated": "2026-08-05",
+          "defaulted": 99,
+          "digits": "777",
+          "either": null,
+          "exampled": "from-example",
+          "fixed": "immutable",
+          "flag": true,
+          "guarded": {
+            "visible": "ZZZ"
+          },
+          "host": "example.test",
+          "ident": "00000000-0000-4000-8000-000000000001",
+          "link": "https://example.test/resource",
+          "lower": "aa",
+          "mail": "kahea@example.test",
+          "merged": {
+            "a": "77",
+            "b": 5
+          },
+          "multi": 0,
+          "nested": {
+            "p": "pin",
+            "q": 0
+          },
+          "nothing": null,
+          "pair": [
+            9,
+            0
+          ],
+          "raw": "a2FoZWE=",
+          "reffed": {
+            "label": "fixed"
+          },
+          "sampled": "one",
+          "stamped": "2026-08-05T00:00:00Z",
+          "tags": [
+            "dd",
+            "cc",
+            "aa"
+          ],
+          "union": 1,
+          "upper": "AA",
+          "v4": "192.0.2.1",
+          "v6": "2001:db8::1"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Channel",
+            "value": "777"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:12474329797001005402",
+        "target": "https://api.example.test/surface/ZZZZZZ?count=40&kind=gamma&verbose=true"
+      },
+      {
+        "body": {
+          "choice": "beta",
+          "dated": "2026-08-05",
+          "defaulted": 0,
+          "digits": "777",
+          "either": null,
+          "exampled": "from-example",
+          "fixed": "immutable",
+          "flag": false,
+          "guarded": {
+            "visible": "77"
+          },
+          "host": "example.test",
+          "ident": "00000000-0000-4000-8000-000000000001",
+          "link": "https://example.test/resource",
+          "lower": "aa",
+          "mail": "kahea@example.test",
+          "merged": {
+            "a": "a",
+            "b": 0
+          },
+          "multi": "ZZZZ",
+          "nested": {
+            "p": "pin",
+            "q": 9
+          },
+          "nothing": null,
+          "pair": [
+            0,
+            0
+          ],
+          "raw": "a2FoZWE=",
+          "reffed": {
+            "label": "fixed"
+          },
+          "sampled": "a",
+          "stamped": "2026-08-05T00:00:00Z",
+          "tags": [
+            "cc",
+            "aa",
+            "ee"
+          ],
+          "union": "y",
+          "upper": "AA",
+          "v4": "192.0.2.1",
+          "v6": "2001:db8::1"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Channel",
+            "value": "ZZZZ"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:14407053272291851536",
+        "target": "https://api.example.test/surface/7777?count=40&kind=gamma&verbose=true"
+      }
+    ],
+    "fingerprint": "b3:ae5bf966ce9a65870745ac1becc6676fe1bc1b4ce3b04dfb1c401e0486004f0d",
+    "requested_cases": 6,
+    "required_grants": [
+      "conformance:execute:6",
+      "http:POST",
+      "net:api.example.test:443"
+    ],
+    "seed": 42
+  },
+  "optional": {
+    "cases": [
+      {
+        "body": {
+          "b": 9
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Hint",
+            "value": "9"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:16980825849178281752",
+        "target": "https://api.example.test/optional?trace=ZZZZ"
+      },
+      {
+        "body": null,
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "X-Hint",
+            "value": "0"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:17269585803613446119",
+        "target": "https://api.example.test/optional?trace=77"
+      },
+      {
+        "body": {
+          "c": false
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Hint",
+            "value": "0"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:6020769619100638856",
+        "target": "https://api.example.test/optional?trace=77"
+      },
+      {
+        "body": null,
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "X-Hint",
+            "value": "9"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:6870876058134841981",
+        "target": "https://api.example.test/optional?trace=a"
+      },
+      {
+        "body": {
+          "b": 9
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Hint",
+            "value": "0"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:12474329797001005402",
+        "target": "https://api.example.test/optional?trace=a"
+      },
+      {
+        "body": {
+          "b": 9
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:14407053272291851536",
+        "target": "https://api.example.test/optional"
+      },
+      {
+        "body": {
+          "b": 9
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Hint",
+            "value": "0"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:2278514145019572884",
+        "target": "https://api.example.test/optional?trace=77"
+      },
+      {
+        "body": {
+          "a": "ZZZ",
+          "d": "q"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Hint",
+            "value": "0"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:13314051694384262666",
+        "target": "https://api.example.test/optional?trace=ZZZZ"
+      },
+      {
+        "body": null,
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "X-Hint",
+            "value": "0"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:11627099864105000701",
+        "target": "https://api.example.test/optional?trace=ZZZZ"
+      },
+      {
+        "body": {
+          "a": "ZZZ",
+          "d": "p"
+        },
+        "generation": "positive",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "name": "X-Hint",
+            "value": "9"
+          }
+        ],
+        "method": "POST",
+        "strategy": "schema-valid:11900344073441544038",
+        "target": "https://api.example.test/optional?trace=a"
+      }
+    ],
+    "fingerprint": "b3:3163637d4f9c0f6b9ea09adf6c74d18822f5fe6a2bb17be9b5564099302f3a1c",
+    "requested_cases": 10,
+    "required_grants": [
+      "conformance:execute:10",
+      "http:POST",
+      "net:api.example.test:443"
+    ],
+    "seed": 42
+  }
+}

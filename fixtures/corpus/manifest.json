@@ -1,0 +1,74 @@
+{
+  "retrieved_on": "2026-08-05",
+  "network_policy": "Snapshots are read locally in tests. CI never downloads or invokes these APIs.",
+  "fixtures": [
+    {
+      "id": "swagger-petstore-3",
+      "file": "swagger-petstore-3.0.json",
+      "source_url": "https://petstore3.swagger.io/api/v3/openapi.json",
+      "live_base_url": "https://petstore3.swagger.io/api/v3",
+      "specification": "OpenAPI 3.0.4",
+      "expected_operations": 19,
+      "expected_exit": 0,
+      "sha256": "00441c05add60f28da55eb4563d3fb6bbda364ba8eb7b381e2e2c98613005c82",
+      "coverage": ["CRUD", "OAuth 2.0", "API keys", "multipart", "XML", "binary upload", "read/write/destructive risk"]
+    },
+    {
+      "id": "swagger-generator-3",
+      "file": "swagger-generator-3.0.json",
+      "source_url": "https://generator3.swagger.io/openapi.json",
+      "live_base_url": "https://generator3.swagger.io/api",
+      "specification": "OpenAPI 3.0.1",
+      "expected_operations": 10,
+      "expected_exit": 0,
+      "sha256": "c5196895f5c1cc7b62c3ebca5f6183d1374e33d7d4cf2c6c6c555fa4c59e4316",
+      "coverage": ["relative server URL", "binary responses", "deprecated operations", "vendor extensions", "free-form objects"]
+    },
+    {
+      "id": "pokeapi",
+      "file": "pokeapi-3.1.yaml",
+      "source_url": "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/openapi.yml",
+      "live_base_url": "https://pokeapi.co/api/v2",
+      "specification": "OpenAPI 3.1.0",
+      "expected_operations": 100,
+      "expected_exit": 0,
+      "sha256": "575d45e6ddc1c0798d127b9867532d868fc2360d1c82b9538f16e149c6420a83",
+      "coverage": ["large YAML", "read-heavy API", "pagination", "deep component graph", "Unicode descriptions"]
+    },
+    {
+      "id": "openai",
+      "file": "openai-3.1.yaml",
+      "source_url": "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml",
+      "live_base_url": "https://api.openai.com/v1",
+      "specification": "OpenAPI 3.1.0",
+      "expected_operations": 288,
+      "expected_exit": 0,
+      "sha256": "ab0c5306e390c64efbf50bbf71f02aa0dad2dafcaa96066a592186daa6103b87",
+      "coverage": ["2.8 MB YAML", "large numeric bounds", "callbacks", "discriminated unions", "authenticated production API"],
+      "invocation_policy": "schema-only; never invoke automatically"
+    },
+    {
+      "id": "httpbin-swagger-2",
+      "file": "httpbin-swagger-2.0.json",
+      "source_url": "https://httpbin.org/spec.json",
+      "live_base_url": "https://httpbin.org",
+      "specification": "Swagger 2.0",
+      "expected_operations": null,
+      "expected_exit": 2,
+      "sha256": "1e1ea0d01f816c66790d9251f34a1cf9cf623364a4a0a802f7f3789dd543dda3",
+      "coverage": ["intentional unsupported-version case", "redirects", "compression", "auth", "cookies", "streaming", "unusual methods"]
+    },
+    {
+      "id": "openapi-3.2-conformance",
+      "file": "openapi-3.2-query-webhook.yaml",
+      "source_url": "https://spec.openapis.org/oas/v3.2.0.html",
+      "live_base_url": null,
+      "specification": "OpenAPI 3.2.0",
+      "expected_operations": 1,
+      "expected_exit": 0,
+      "sha256": "c27c518ef2559bb007a2ae099042a14a5fe3ec36e1c810ca99fee1355e378228",
+      "coverage": ["QUERY method", "request body on a safe operation", "top-level webhooks", "explicit absence diagnostic"]
+    }
+  ]
+}
+

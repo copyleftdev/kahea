@@ -1,0 +1,8 @@
+{
+  "operationId": "readFixture",
+  "method": "GET",
+  "url": "https://api.example.test/widgets/widget-1",
+  "headers": {
+    "Accept": "application/json"
+  }
+}

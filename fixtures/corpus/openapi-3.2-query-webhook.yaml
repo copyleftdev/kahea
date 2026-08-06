@@ -1,0 +1,56 @@
+openapi: 3.2.0
+info:
+  title: Kāhea OpenAPI 3.2 conformance fixture
+  version: 1.0.0
+servers:
+  - url: https://api.example.test/v1
+paths:
+  /pets/search:
+    query:
+      operationId: searchPets
+      summary: Search pets with a structured request body
+      tags:
+        - pets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [available, pending, adopted]
+      responses:
+        "200":
+          description: Matching pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pet"
+webhooks:
+  petAdopted:
+    post:
+      operationId: petAdoptedWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pet"
+      responses:
+        "204":
+          description: Webhook accepted
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string

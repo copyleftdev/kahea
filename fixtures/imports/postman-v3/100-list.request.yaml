@@ -1,0 +1,8 @@
+type: http
+name: List widgets
+order: 100
+request:
+  method: GET
+  url: https://api.example.test/widgets?limit=25
+  headers:
+    Accept: application/json

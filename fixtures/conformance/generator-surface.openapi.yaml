@@ -1,0 +1,154 @@
+openapi: 3.1.0
+info:
+  title: Kāhea generator surface fixture
+  version: 1.0.0
+servers:
+  - url: https://api.example.test
+paths:
+  /surface/{id}:
+    post:
+      operationId: writeSurface
+      summary: Every schema construct the bounded generator supports
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 3, maxLength: 6 }
+        - name: kind
+          in: query
+          required: true
+          schema: { type: string, enum: [alpha, beta, gamma] }
+        - name: count
+          in: query
+          required: true
+          schema: { type: integer, minimum: 5, maximum: 40, multipleOf: 5 }
+        - name: verbose
+          in: query
+          required: true
+          schema: { type: boolean }
+        - name: X-Channel
+          in: header
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 4 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - fixed
+                - choice
+                - exampled
+                - defaulted
+                - sampled
+                - union
+                - either
+                - merged
+                - multi
+                - flag
+                - nothing
+                - tags
+                - pair
+                - nested
+                - guarded
+                - dated
+                - stamped
+                - mail
+                - ident
+                - link
+                - host
+                - v4
+                - v6
+                - raw
+                - digits
+                - upper
+                - lower
+                - reffed
+              properties:
+                fixed: { const: "immutable" }
+                choice: { type: string, enum: [alpha, beta, gamma] }
+                exampled: { type: string, minLength: 1, maxLength: 9, example: "from-example" }
+                defaulted: { type: integer, minimum: 0, maximum: 99, default: 41 }
+                sampled:
+                  type: string
+                  minLength: 1
+                  maxLength: 9
+                  examples: ["one", "two", "three"]
+                union:
+                  oneOf:
+                    - { type: integer, minimum: 1, maximum: 3 }
+                    - { type: string, enum: ["x", "y"] }
+                either:
+                  anyOf:
+                    - { type: boolean }
+                    - { type: "null" }
+                merged:
+                  allOf:
+                    - type: object
+                      required: [a]
+                      properties:
+                        a: { type: string, minLength: 1, maxLength: 2 }
+                    - type: object
+                      required: [b]
+                      properties:
+                        b: { type: integer, minimum: 0, maximum: 5 }
+                multi: { type: [string, integer], minLength: 1, maxLength: 4, minimum: 0, maximum: 9 }
+                flag: { type: boolean }
+                nothing: { type: "null" }
+                tags:
+                  type: array
+                  minItems: 2
+                  maxItems: 3
+                  uniqueItems: true
+                  items: { type: string, enum: [aa, bb, cc, dd, ee, ff] }
+                pair:
+                  type: array
+                  minItems: 2
+                  maxItems: 2
+                  items: { type: integer, minimum: 0, maximum: 9 }
+                nested:
+                  type: object
+                  minProperties: 2
+                  required: [p]
+                  properties:
+                    p: { type: string, minLength: 1, maxLength: 4 }
+                    q: { type: integer, minimum: 0, maximum: 9 }
+                    r: { type: boolean }
+                guarded:
+                  type: object
+                  minProperties: 1
+                  properties:
+                    hidden: { type: string, minLength: 1, maxLength: 3, readOnly: true }
+                    visible: { type: string, minLength: 1, maxLength: 3 }
+                dated: { type: string, format: date }
+                stamped: { type: string, format: date-time }
+                mail: { type: string, format: email }
+                ident: { type: string, format: uuid }
+                link: { type: string, format: uri }
+                host: { type: string, format: hostname }
+                v4: { type: string, format: ipv4 }
+                v6: { type: string, format: ipv6 }
+                raw: { type: string, format: byte }
+                digits: { type: string, pattern: "^[0-9]+$", minLength: 3, maxLength: 6 }
+                upper: { type: string, pattern: "^[A-Z]+$", minLength: 2, maxLength: 4 }
+                lower: { type: string, pattern: "^[a-z]+$", minLength: 2, maxLength: 4 }
+                reffed: { $ref: "#/components/schemas/Small" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema: { type: object }
+        "400":
+          description: Rejected
+          content:
+            application/json:
+              schema: { type: object }
+components:
+  schemas:
+    Small:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, minLength: 2, maxLength: 5 }

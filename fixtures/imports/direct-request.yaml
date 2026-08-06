@@ -1,0 +1,5 @@
+operationId: deleteFixture
+method: DELETE
+url: https://api.example.test/widgets/widget-1
+headers:
+  Accept: application/json

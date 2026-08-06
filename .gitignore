@@ -1,0 +1,5 @@
+/target
+/.kahea
+/mutants.out
+*.tmp
+/mutants.out.old
