@@ -4,8 +4,6 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "0 5 * * 1"
 
 permissions:
   contents: read
@@ -44,28 +42,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Mutation testing is off the push path. Every mutant carries the whole
-  # workspace suite behind it, and a hosted runner could not finish even the
-  # two-package scope: the first attempt produced no result in 39 minutes and
-  # was cancelled. It runs weekly and on demand instead, reporting rather than
-  # gating, so the survivor list stays visible without a permanently red check
-  # on every push. Locally `scripts/mutation-gate.sh` is the real gate.
-  mutation:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-mutants --locked
-      - run: scripts/mutation-gate.sh
-        env:
-          KAHEA_MUTANT_JOBS: "1"
-          KAHEA_MUTANT_COPY_TARGET: "false"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mutants
-          path: mutants.out/
+# Mutation testing is deliberately not a CI job. Every mutant rebuilds the
+# workspace and reruns its whole suite, so a full sweep runs for hours of
+# billable runner time to re-derive a result that does not change between
+# commits. `scripts/mutation-gate.sh` is a local tool; run it before releasing
+# or after touching a kernel crate.

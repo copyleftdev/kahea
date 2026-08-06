@@ -19,13 +19,13 @@ Kāhea requires Rust 1.85 or newer.
 ```bash
 cargo build --release -p kahea
 scripts/gates.sh
-# Requires cargo-mutants; this is also a dedicated CI job.
+# Requires cargo-mutants; run locally, not in CI.
 scripts/mutation-gate.sh
 ```
 
 The mutation gate is resource-bounded so it cannot take a workstation with it. It runs four jobs, caps compiler concurrency across all of them with a GNU jobserver, keeps its build copies on a disk path rather than a `tmpfs` `TMPDIR`, and confines itself to a transient systemd scope with CPU and memory limits when a user session bus is available. Override with `KAHEA_MUTANT_JOBS`, `KAHEA_MUTANT_TASKS`, `KAHEA_MUTANT_CPU_QUOTA`, `KAHEA_MUTANT_MEMORY_HIGH`, `KAHEA_MUTANT_MEMORY_MAX`, `KAHEA_MUTANT_SCRATCH`, `KAHEA_MUTANT_COPY_TARGET`, or `KAHEA_MUTANT_UNCONFINED=1`.
 
-Every mutant is judged by the whole workspace suite, which is thorough but slow, so scope matters. `KAHEA_MUTANT_PACKAGES` selects the packages to mutate (all four by default) and `KAHEA_MUTANT_EXTRA` passes further arguments through, such as `--in-diff` for a change-scoped run. The gate is meant to be run locally; in CI it runs weekly and on demand and reports rather than blocks, because a hosted runner cannot finish it inside a push.
+Every mutant is judged by the whole workspace suite, which is thorough but slow, so scope matters. `KAHEA_MUTANT_PACKAGES` selects the packages to mutate (all four by default) and `KAHEA_MUTANT_EXTRA` passes further arguments through, such as `--in-diff` for a change-scoped run. The gate is a local tool and deliberately not a CI job: a sweep runs for hours to re-derive a result that does not move between commits. Run it before releasing, or after touching a kernel crate.
 
 The resulting binary is `target/release/kahea`. Every command emits one compact `kahea/k1` JSON envelope followed by a newline. `--format ndjson` makes the streaming intent explicit and is composition-compatible with loops and pipes.
 
