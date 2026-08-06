@@ -12,6 +12,7 @@ cores=$(nproc 2>/dev/null || echo 4)
 default_jobs=4
 [ "$cores" -lt "$default_jobs" ] && default_jobs=$cores
 
+packages=${KAHEA_MUTANT_PACKAGES:-"kahea-core kahea-plan kahea-conformance kahea-ingest"}
 jobs=${KAHEA_MUTANT_JOBS:-$default_jobs}
 tasks=${KAHEA_MUTANT_TASKS:-$((jobs * 2))}
 timeout=${KAHEA_MUTANT_TIMEOUT:-90}
@@ -42,16 +43,23 @@ export TMPDIR
 # runs `cargo test --package=<mutated package>`, so a mutant is judged only by
 # its own crate's tests. Injecting `--workspace` into every cargo invocation
 # puts all 113 workspace tests behind each mutant instead of 7 or 19.
-set -- cargo mutants \
-  -p kahea-core \
-  -p kahea-plan \
-  -p kahea-conformance \
-  -p kahea-ingest \
+set -- cargo mutants
+for package in $packages; do
+  set -- "$@" -p "$package"
+done
+set -- "$@" \
   -j "$jobs" \
   --jobserver-tasks "$tasks" \
   --copy-target "$copy_target" \
   --timeout "$timeout" \
   --cargo-arg=--workspace
+
+# Scope escape hatch for callers that need a narrower run than a package list,
+# such as `--in-diff` on a pull request.
+if [ -n "${KAHEA_MUTANT_EXTRA:-}" ]; then
+  # shellcheck disable=SC2086
+  set -- "$@" $KAHEA_MUTANT_EXTRA
+fi
 
 # Probe rather than trust: `systemd-run` is present on many CI images but has
 # no user session bus to run a transient scope in.
@@ -71,7 +79,7 @@ fi
 command -v ionice >/dev/null 2>&1 && set -- ionice -c 3 "$@"
 command -v nice >/dev/null 2>&1 && set -- nice -n 19 "$@"
 
-echo "mutation gate: jobs=$jobs tasks=$tasks cpu=$cpu_quota memory=$memory_high/$memory_max scratch=$scratch" >&2
+echo "mutation gate: packages=[$packages] jobs=$jobs tasks=$tasks cpu=$cpu_quota memory=$memory_high/$memory_max scratch=$scratch" >&2
 
 # Run as a child rather than exec'ing, so an interrupted gate still reaches the
 # cleanup trap instead of stranding tens of gigabytes of build copies.
