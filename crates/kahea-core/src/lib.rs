@@ -401,37 +401,11 @@ impl WebSocketPlan {
                 .then_with(|| left.name.cmp(&right.name))
         });
         for action in &mut self.actions {
-            match action {
-                WebSocketAction::ExpectJson { equals, schema, .. } => {
-                    if let Some(value) = equals {
-                        canonicalize_json(value);
-                    }
-                    if let Some(value) = schema {
-                        canonicalize_json(value);
-                    }
-                }
-                WebSocketAction::ExpectClose { codes, .. } => {
-                    codes.sort_unstable();
-                    codes.dedup();
-                }
-                _ => {}
+            if let WebSocketAction::ExpectClose { codes, .. } = action {
+                codes.sort_unstable();
+                codes.dedup();
             }
         }
-    }
-}
-
-fn canonicalize_json(value: &mut Value) {
-    match value {
-        Value::Array(values) => values.iter_mut().for_each(canonicalize_json),
-        Value::Object(object) => {
-            let mut fields = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            fields.sort_by(|left, right| left.0.cmp(&right.0));
-            for (_, value) in &mut fields {
-                canonicalize_json(value);
-            }
-            object.extend(fields);
-        }
-        _ => {}
     }
 }
 
@@ -1517,6 +1491,355 @@ mod tests {
             },
         );
         assert!(oversized.seal().is_err());
+    }
+
+    #[test]
+    fn websocket_error_messages_are_stable() {
+        assert_eq!(
+            WebSocketPlanError::Invalid("bad marker".into()).to_string(),
+            "invalid WebSocket plan: bad marker"
+        );
+        let error = serde_json::from_str::<Value>("{").unwrap_err();
+        assert!(
+            WebSocketPlanError::Serialization(error)
+                .to_string()
+                .starts_with("serialize WebSocket plan:")
+        );
+    }
+
+    #[test]
+    fn websocket_plan_markers_fail_independently() {
+        for marker in ["protocol", "kind", "valid", "exit"] {
+            let mut plan = websocket_plan();
+            match marker {
+                "protocol" => plan.protocol = "other/v1".into(),
+                "kind" => plan.kind = "plan".into(),
+                "valid" => plan.valid = false,
+                "exit" => plan.exit = 1,
+                _ => unreachable!(),
+            }
+            assert!(plan.validate().is_err(), "accepted invalid {marker}");
+        }
+    }
+
+    #[test]
+    fn websocket_outbound_aggregates_enforce_exact_limits() {
+        let mut frames = websocket_plan();
+        frames.actions = vec![
+            WebSocketAction::Ping {
+                payload_base64: String::new(),
+            },
+            WebSocketAction::Close {
+                code: 1000,
+                reason: String::new(),
+            },
+        ];
+        frames.limits.max_outbound_frames = 2;
+        assert!(frames.validate().is_ok());
+        frames.limits.max_outbound_frames = 1;
+        assert!(frames.validate().is_err());
+
+        let mut messages = websocket_plan();
+        messages.actions = vec![
+            WebSocketAction::SendText { text: "a".into() },
+            WebSocketAction::SendText { text: "b".into() },
+            WebSocketAction::Close {
+                code: 1000,
+                reason: String::new(),
+            },
+        ];
+        messages.limits.max_outbound_messages = 2;
+        assert!(messages.validate().is_ok());
+        messages.limits.max_outbound_messages = 1;
+        assert!(messages.validate().is_err());
+
+        let mut bytes = websocket_plan();
+        bytes.actions = vec![WebSocketAction::Close {
+            code: 1000,
+            reason: "x".into(),
+        }];
+        bytes.limits.max_outbound_bytes = 3;
+        assert!(bytes.validate().is_ok());
+        bytes.limits.max_outbound_bytes = 2;
+        assert!(bytes.validate().is_err());
+    }
+
+    #[test]
+    fn websocket_normalization_sorts_expected_close_codes() {
+        let mut plan = websocket_plan();
+        plan.actions = vec![WebSocketAction::ExpectClose {
+            codes: vec![1001, 1000, 1001],
+            reason: None,
+            timeout_ms: None,
+        }];
+        plan.normalize();
+        match &plan.actions[0] {
+            WebSocketAction::ExpectClose { codes, .. } => {
+                assert_eq!(codes, &[1000, 1001]);
+            }
+            action => panic!("unexpected action: {action:?}"),
+        }
+    }
+
+    #[test]
+    fn websocket_limit_relationships_are_independent_and_inclusive() {
+        let baseline = websocket_plan().limits;
+        assert!(validate_websocket_limits(&baseline).is_ok());
+
+        let mut equal = baseline.clone();
+        equal.max_message_bytes = equal.max_frame_bytes;
+        equal.connect_timeout_ms = equal.total_timeout_ms;
+        equal.action_timeout_ms = equal.total_timeout_ms;
+        equal.idle_timeout_ms = equal.total_timeout_ms;
+        equal.close_timeout_ms = equal.total_timeout_ms;
+        assert!(validate_websocket_limits(&equal).is_ok());
+
+        let mut invalid = baseline.clone();
+        invalid.max_message_bytes = invalid.max_frame_bytes - 1;
+        assert!(validate_websocket_limits(&invalid).is_err());
+
+        macro_rules! assert_timeout_exceeds_total {
+            ($field:ident) => {{
+                let mut invalid = baseline.clone();
+                invalid.$field = invalid.total_timeout_ms + 1;
+                assert!(
+                    validate_websocket_limits(&invalid).is_err(),
+                    "accepted an excessive {}",
+                    stringify!($field)
+                );
+            }};
+        }
+        assert_timeout_exceeds_total!(connect_timeout_ms);
+        assert_timeout_exceeds_total!(action_timeout_ms);
+        assert_timeout_exceeds_total!(idle_timeout_ms);
+        assert_timeout_exceeds_total!(close_timeout_ms);
+    }
+
+    #[test]
+    fn websocket_header_and_subprotocol_rules_are_independent() {
+        let valid = PlannedHeader {
+            name: "X-Client".into(),
+            value: "kahea".into(),
+        };
+        assert!(validate_websocket_headers(std::slice::from_ref(&valid)).is_ok());
+
+        let invalid_name = PlannedHeader {
+            name: "Bad Header".into(),
+            value: "safe".into(),
+        };
+        assert!(validate_websocket_headers(&[invalid_name]).is_err());
+
+        let invalid_value = PlannedHeader {
+            name: "X-Safe".into(),
+            value: "bad\r\nvalue".into(),
+        };
+        assert!(validate_websocket_headers(&[invalid_value]).is_err());
+
+        assert!(
+            validate_websocket_headers(&[
+                valid.clone(),
+                PlannedHeader {
+                    name: "x-client".into(),
+                    value: "duplicate".into(),
+                },
+            ])
+            .is_err()
+        );
+
+        assert!(validate_subprotocols(&["events.v1".into()]).is_ok());
+        assert!(validate_subprotocols(&["bad protocol".into()]).is_err());
+        assert!(validate_subprotocols(&["events.v1".into(), "events.v1".into()]).is_err());
+
+        assert!(valid_token("events.v1"));
+        assert!(!valid_token(""));
+        assert!(!valid_token("bad protocol"));
+    }
+
+    #[test]
+    fn websocket_base64_and_action_timeouts_are_exact() {
+        assert_eq!(decode_canonical_base64("/w==").unwrap(), vec![255]);
+        assert!(decode_canonical_base64("/x==").is_err());
+
+        let limits = websocket_plan().limits;
+        assert!(validate_action_timeout(None, &limits).is_ok());
+        assert!(validate_action_timeout(Some(1), &limits).is_ok());
+        assert!(validate_action_timeout(Some(limits.action_timeout_ms), &limits).is_ok());
+        assert!(validate_action_timeout(Some(0), &limits).is_err());
+        assert!(validate_action_timeout(Some(limits.action_timeout_ms + 1), &limits).is_err());
+    }
+
+    #[test]
+    fn websocket_message_and_pointer_boundaries_are_exact() {
+        let mut message_limited = websocket_plan().limits;
+        message_limited.max_message_bytes = 4;
+        message_limited.max_frame_bytes = 8;
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::SendText {
+                    text: "1234".into()
+                },
+                &message_limited
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::SendText {
+                    text: "12345".into()
+                },
+                &message_limited
+            )
+            .is_err()
+        );
+
+        let mut frame_limited = websocket_plan().limits;
+        frame_limited.max_message_bytes = 8;
+        frame_limited.max_frame_bytes = 4;
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::SendText {
+                    text: "1234".into()
+                },
+                &frame_limited
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::SendText {
+                    text: "12345".into()
+                },
+                &frame_limited
+            )
+            .is_err()
+        );
+
+        let limits = websocket_plan().limits;
+        let expect_json = |pointer: String| WebSocketAction::ExpectJson {
+            pointer: Some(pointer),
+            equals: Some(Value::Bool(true)),
+            schema: None,
+            timeout_ms: None,
+        };
+        assert!(
+            validate_websocket_action(&expect_json(format!("/{}", "a".repeat(2047))), &limits)
+                .is_ok()
+        );
+        assert!(
+            validate_websocket_action(&expect_json(format!("/{}", "a".repeat(2048))), &limits)
+                .is_err()
+        );
+        assert!(validate_websocket_action(&expect_json("not-a-pointer".into()), &limits).is_err());
+    }
+
+    #[test]
+    fn websocket_control_and_close_boundaries_are_exact() {
+        let limits = websocket_plan().limits;
+        let payload_125 = base64::engine::general_purpose::STANDARD.encode([0; 125]);
+        let payload_126 = base64::engine::general_purpose::STANDARD.encode([0; 126]);
+
+        assert_eq!(
+            validate_websocket_action(
+                &WebSocketAction::Ping {
+                    payload_base64: payload_125.clone()
+                },
+                &limits
+            )
+            .unwrap(),
+            (1, 0, 125, false)
+        );
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::Ping {
+                    payload_base64: payload_126.clone()
+                },
+                &limits
+            )
+            .is_err()
+        );
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::ExpectPong {
+                    payload_base64: payload_125,
+                    timeout_ms: None
+                },
+                &limits
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::ExpectPong {
+                    payload_base64: payload_126,
+                    timeout_ms: None
+                },
+                &limits
+            )
+            .is_err()
+        );
+
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::Close {
+                    code: 1000,
+                    reason: "a".repeat(123)
+                },
+                &limits
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::Close {
+                    code: 1000,
+                    reason: "a".repeat(124)
+                },
+                &limits
+            )
+            .is_err()
+        );
+        assert_eq!(
+            validate_websocket_action(
+                &WebSocketAction::Close {
+                    code: 1000,
+                    reason: "abc".into()
+                },
+                &limits
+            )
+            .unwrap(),
+            (1, 0, 5, true)
+        );
+
+        assert!(
+            validate_websocket_action(
+                &WebSocketAction::ExpectClose {
+                    codes: vec![1000],
+                    reason: Some("a".repeat(123)),
+                    timeout_ms: None
+                },
+                &limits
+            )
+            .is_ok()
+        );
+        for invalid in [
+            WebSocketAction::ExpectClose {
+                codes: Vec::new(),
+                reason: None,
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1006],
+                reason: None,
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: Some("a".repeat(124)),
+                timeout_ms: None,
+            },
+        ] {
+            assert!(validate_websocket_action(&invalid, &limits).is_err());
+        }
     }
 
     #[test]
