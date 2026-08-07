@@ -31,6 +31,13 @@ The full mutation sweep is intentionally local because it is expensive. Narrow i
 `KAHEA_MUTANT_PACKAGES` or `KAHEA_MUTANT_EXTRA`, then run the complete affected package before
 requesting review.
 
+## Architecture decisions
+
+User-visible protocol and execution decisions live in [`docs/architecture`](docs/architecture/README.md).
+Read the relevant decision before changing public envelopes, plan sealing, capability grants, or
+transport behavior. New decisions should include compatibility impact, failure semantics, security
+invariants, and executable fixtures where the contract is mature enough to encode.
+
 ## Pull requests
 
 - Explain the user-visible contract, the failure mode, and how it was verified.
