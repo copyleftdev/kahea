@@ -1,0 +1,43 @@
+openapi: 3.1.0
+info:
+  title: Kāhea cookie parameter fixture
+  version: 1.0.0
+servers:
+  - url: https://api.example.test
+paths:
+  /sessions/{id}:
+    post:
+      operationId: touchSession
+      summary: Cookie parameters alongside two query parameters
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 6 }
+        - name: session
+          in: cookie
+          required: true
+          schema: { type: string, minLength: 3, maxLength: 8 }
+        - name: theme
+          in: cookie
+          required: true
+          schema: { type: string, enum: [light, dark] }
+        - name: region
+          in: query
+          required: true
+          schema: { type: string, enum: [eu, us] }
+        - name: limit
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 9 }
+      responses:
+        "200":
+          description: Touched
+          content:
+            application/json:
+              schema: { type: object }
+        "400":
+          description: Rejected
+          content:
+            application/json:
+              schema: { type: object }
