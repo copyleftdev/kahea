@@ -334,7 +334,7 @@ pass.
 
 ### Dependency selection gate
 
-#9 may select a WebSocket dependency only after a small proof against #16 demonstrates:
+Issue `#9` may select a WebSocket dependency only after a small proof against `#16` demonstrates:
 
 - correct RFC 6455 masking, fragmentation, control-frame, UTF-8, and close validation;
 - caller-supplied TCP streams or equivalent address pinning so the library cannot re-resolve DNS;

@@ -16,3 +16,6 @@ shell-words.workspace = true
 thiserror.workspace = true
 url.workspace = true
 yaml-rust2.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
