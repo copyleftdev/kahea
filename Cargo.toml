@@ -16,9 +16,12 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/copyleftdev/kahea"
+homepage = "https://github.com/copyleftdev/kahea"
+description = "Local-first deterministic API invocation kernel for coding agents"
+publish = false
 
 [workspace.dependencies]
 blake3 = "1.8.2"

@@ -193,11 +193,8 @@ fn validate(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
                 return fail(&format!("is above maximum {maximum}"));
             }
         }
-        Some("boolean") => {
-            if !value.is_boolean() {
-                return fail("is not a boolean");
-            }
-        }
+        Some("boolean") if !value.is_boolean() => return fail("is not a boolean"),
+        Some("boolean") => {}
         Some("array") => {
             let Some(items) = value.as_array() else {
                 return fail("is not an array");

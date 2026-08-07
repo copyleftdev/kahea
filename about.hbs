@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Kāhea third-party licenses</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 76rem; margin: 3rem auto; padding: 0 1.5rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; background: #f5f5f5; }
+  </style>
+</head>
+<body>
+  <h1>Kāhea third-party licenses</h1>
+  {{#each licenses}}
+  <section>
+    <h2>{{name}}</h2>
+    <p>Used by:
+      {{#each used_by}}
+        <a href="{{crate.repository}}">{{crate.name}} {{crate.version}}</a>{{#unless @last}}, {{/unless}}
+      {{/each}}
+    </p>
+    <pre>{{text}}</pre>
+  </section>
+  {{/each}}
+</body>
+</html>

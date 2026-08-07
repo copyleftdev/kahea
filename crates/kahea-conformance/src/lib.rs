@@ -418,7 +418,7 @@ fn generated_input(
         if section.contains_key(name) {
             continue;
         }
-        if required || variant % 3 != 0 {
+        if required || !variant.is_multiple_of(3) {
             let schema = parameter.get("schema").unwrap_or(&Value::Null);
             section.insert(
                 name.into(),
@@ -429,7 +429,7 @@ fn generated_input(
 
     if let Some((schema, required)) = request_body_schema(source, operation, content_type)? {
         let existing = input_object.get("body").cloned();
-        if required || existing.is_some() || variant % 2 == 0 {
+        if required || existing.is_some() || variant.is_multiple_of(2) {
             input_object.insert(
                 "body".into(),
                 generate_value_with_baseline(
@@ -464,9 +464,7 @@ fn generate_value_with_baseline(
     let Some(existing) = baseline.as_object() else {
         return Ok(baseline.clone());
     };
-    let is_object = schema.get("type").and_then(Value::as_str) == Some("object")
-        || schema.get("properties").is_some();
-    if !is_object {
+    if schema.get("properties").is_none() {
         return Ok(baseline.clone());
     }
     let properties = schema
@@ -502,7 +500,7 @@ fn generate_value_with_baseline(
                     Some(value),
                 )?,
             );
-        } else if required.contains(name.as_str()) || (variant + index as u64) % 3 == 0 {
+        } else if required.contains(name.as_str()) || (variant + index as u64).is_multiple_of(3) {
             object.insert(
                 name.clone(),
                 generate_value(
@@ -608,7 +606,7 @@ fn generate_value(
         }
         return Ok(values[(variant as usize) % values.len()].clone());
     }
-    if variant % 5 == 0 {
+    if variant.is_multiple_of(5) {
         if let Some(value) = schema.get("example").or_else(|| schema.get("default")) {
             return Ok(value.clone());
         }
@@ -663,7 +661,7 @@ fn generate_value(
         .unwrap_or("string");
     match kind {
         "null" => Ok(Value::Null),
-        "boolean" => Ok(Value::Bool(variant % 2 == 0)),
+        "boolean" => Ok(Value::Bool(variant.is_multiple_of(2))),
         "integer" => generate_integer(schema, variant, path),
         "number" => generate_number(schema, variant, path),
         "string" => generate_string(schema, variant, path).map(Value::String),
@@ -730,7 +728,8 @@ fn generate_value(
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if !read_only
-                    && (required.contains(name.as_str()) || (variant + index as u64) % 3 == 0)
+                    && (required.contains(name.as_str())
+                        || (variant + index as u64).is_multiple_of(3))
                 {
                     object.insert(
                         name.clone(),
@@ -840,7 +839,7 @@ fn generate_number(schema: &Value, variant: u64, path: &str) -> Result<Value, Co
     if let Some(exclusive) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
         maximum = maximum.min(exclusive - f64::EPSILON * exclusive.abs().max(1.0));
     }
-    if !minimum.is_finite() || !maximum.is_finite() || minimum > maximum {
+    if numeric_bounds_are_invalid(minimum, maximum) {
         return Err(generation(path, "numeric bounds are invalid"));
     }
     let choices = [minimum, maximum, 0.0_f64.clamp(minimum, maximum)];
@@ -860,6 +859,10 @@ fn generate_number(schema: &Value, variant: u64, path: &str) -> Result<Value, Co
     Number::from_f64(selected)
         .map(Value::Number)
         .ok_or_else(|| generation(path, "number cannot be represented as JSON"))
+}
+
+fn numeric_bounds_are_invalid(minimum: f64, maximum: f64) -> bool {
+    !minimum.is_finite() || !maximum.is_finite() || minimum > maximum
 }
 
 fn generate_string(schema: &Value, variant: u64, path: &str) -> Result<String, ConformanceError> {
@@ -896,10 +899,10 @@ fn generate_string(schema: &Value, variant: u64, path: &str) -> Result<String, C
         return Err(generation(path, "string bounds are not safely generatable"));
     }
     if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
-        if let Some(value) = simple_pattern_value(pattern, minimum) {
-            if value.len() <= maximum {
-                return Ok(value);
-            }
+        if let Some(value) = simple_pattern_value(pattern, minimum)
+            && value.len() <= maximum
+        {
+            return Ok(value);
         }
         if let Some(example) = schema
             .get("example")
@@ -992,8 +995,7 @@ fn negative_plans(
         let required = parameter
             .get("required")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || location == "path";
+            .unwrap_or(false);
         if required && location != "path" {
             let mut candidate = plan.clone();
             if remove_parameter(&mut candidate, location, name)? {
@@ -1452,8 +1454,8 @@ pub fn invoke_conformance(
         if failed >= plan.max_failures {
             break;
         }
-        if index > 0 && plan.delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(plan.delay_ms));
+        if let Some(delay) = campaign_delay(index, plan.delay_ms) {
+            std::thread::sleep(delay);
         }
         let request = load_plan(root, &case.plan)
             .map_err(|_| ConformanceError::InvalidCase(case.plan.clone()))?;
@@ -1552,6 +1554,10 @@ pub fn invoke_conformance(
         required: None,
         exit,
     })
+}
+
+fn campaign_delay(index: usize, delay_ms: u64) -> Option<Duration> {
+    (index > 0 && delay_ms > 0).then(|| Duration::from_millis(delay_ms))
 }
 
 fn assess(
@@ -1794,6 +1800,34 @@ paths:
     }
 
     #[test]
+    fn storage_rejects_a_case_fingerprint_mismatch_with_a_valid_request() {
+        let (source, operation) = fixture();
+        let (mut campaign, requests) = build_conformance_plan(
+            &source,
+            &operation,
+            ConformanceOptions {
+                cases: 1,
+                mode: ConformanceMode::Positive,
+                ..ConformanceOptions::default()
+            },
+            &ProjectConfiguration::default(),
+        )
+        .unwrap();
+        campaign.cases[0].plan_fingerprint = "request:fingerprint:mismatch".into();
+        campaign = campaign.seal().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "kahea-conformance-store-mismatch-{}",
+            std::process::id()
+        ));
+
+        assert!(matches!(
+            store_conformance_plan(&root, &campaign, &requests),
+            Err(ConformanceError::InvalidCase(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn campaign_denial_reports_the_first_exact_missing_grant_without_transport() {
         let (source, operation) = fixture();
         let (campaign, requests) = build_conformance_plan(
@@ -1819,6 +1853,145 @@ paths:
             Some("conformance:execute:4")
         );
         assert_eq!(observation.executed, 0);
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_rechecks_the_case_request_digest() {
+        let (source, operation) = fixture();
+        let (mut campaign, requests) = build_conformance_plan(
+            &source,
+            &operation,
+            ConformanceOptions {
+                cases: 1,
+                mode: ConformanceMode::Positive,
+                ..ConformanceOptions::default()
+            },
+            &ProjectConfiguration::default(),
+        )
+        .unwrap();
+        campaign.cases[0].request_digest = "request:digest:mismatch".into();
+        campaign = campaign.seal().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "kahea-conformance-digest-mismatch-{}",
+            std::process::id()
+        ));
+        store_conformance_plan(&root, &campaign, &requests).unwrap();
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let options = InvokeOptions {
+            grants: campaign.required_grants.iter().cloned().collect(),
+            ..InvokeOptions::default()
+        };
+
+        assert!(matches!(
+            invoke_conformance(&campaign, &options, &root, &evidence),
+            Err(ConformanceError::InvalidCase(_))
+        ));
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_case_level_denial_controls_the_campaign_outcome() {
+        let (source, operation) = fixture();
+        let (mut campaign, requests) = build_conformance_plan(
+            &source,
+            &operation,
+            ConformanceOptions {
+                cases: 1,
+                mode: ConformanceMode::Positive,
+                ..ConformanceOptions::default()
+            },
+            &ProjectConfiguration::default(),
+        )
+        .unwrap();
+        let request_grant = requests[0]
+            .required_grants
+            .iter()
+            .find(|grant| !grant.starts_with("conformance:"))
+            .expect("request has a runtime grant")
+            .clone();
+        campaign
+            .required_grants
+            .retain(|grant| grant != &request_grant);
+        campaign = campaign.seal().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "kahea-conformance-case-denial-{}",
+            std::process::id()
+        ));
+        store_conformance_plan(&root, &campaign, &requests).unwrap();
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let observation = invoke_conformance(
+            &campaign,
+            &InvokeOptions {
+                grants: campaign.required_grants.iter().cloned().collect(),
+                ..InvokeOptions::default()
+            },
+            &root,
+            &evidence,
+        )
+        .unwrap();
+
+        assert_eq!(observation.executed, 1);
+        assert_eq!(observation.failed, 1);
+        assert_eq!(observation.exit, 4);
+        assert!(matches!(observation.outcome, Outcome::Denied));
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transport_failures_are_counted_and_classified() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let spec = SPEC.replace(
+            "https://api.example.test",
+            &format!("http://127.0.0.1:{port}"),
+        );
+        let source = load_openapi(Path::new("conformance.yaml"), spec.as_bytes()).unwrap();
+        let operation = resolve_operation(&source, "updateWidget").unwrap();
+        let (campaign, requests) = build_conformance_plan(
+            &source,
+            &operation,
+            ConformanceOptions {
+                cases: 2,
+                max_failures: 2,
+                mode: ConformanceMode::Positive,
+                ..ConformanceOptions::default()
+            },
+            &ProjectConfiguration::default(),
+        )
+        .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "kahea-conformance-transport-{}",
+            std::process::id()
+        ));
+        store_conformance_plan(&root, &campaign, &requests).unwrap();
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let observation = invoke_conformance(
+            &campaign,
+            &InvokeOptions {
+                grants: campaign.required_grants.iter().cloned().collect(),
+                ..InvokeOptions::default()
+            },
+            &root,
+            &evidence,
+        )
+        .unwrap();
+
+        assert_eq!(observation.executed, 2);
+        assert_eq!(observation.failed, 2);
+        assert_eq!(observation.transport_errors, 2);
+        assert_eq!(observation.exit, 3);
+        assert!(matches!(observation.outcome, Outcome::Failed));
+        assert!(
+            observation
+                .cases
+                .iter()
+                .all(|case| case.reason == "transport failed")
+        );
         drop(evidence);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1886,6 +2059,200 @@ paths:
     }
 
     #[test]
+    fn filling_a_missing_baseline_property_charges_one_depth_level() {
+        let (source, _) = fixture();
+        let schema = json!({
+            "type": "object",
+            "required": ["child"],
+            "properties": {"child": {"type": "string"}}
+        });
+
+        let error = generate_value_with_baseline(
+            &source,
+            &schema,
+            0,
+            "body",
+            MAX_GENERATION_DEPTH - 1,
+            Some(&json!({})),
+        )
+        .expect_err("the generated child must cross the depth limit");
+
+        assert!(matches!(
+            error,
+            ConformanceError::Generation { path, reason }
+                if path == "body.child" && reason == "schema generation exceeded 32 levels"
+        ));
+    }
+
+    #[test]
+    fn filling_min_properties_charges_one_depth_level() {
+        let (source, _) = fixture();
+        let schema = json!({
+            "type": "object",
+            "minProperties": 1,
+            "properties": {"child": {"type": "string"}}
+        });
+
+        let error = generate_value(&source, &schema, 1, "body", MAX_GENERATION_DEPTH - 1)
+            .expect_err("the minProperties child must cross the depth limit");
+
+        assert!(matches!(
+            error,
+            ConformanceError::Generation { path, reason }
+                if path == "body.child" && reason == "schema generation exceeded 32 levels"
+        ));
+    }
+
+    #[test]
+    fn each_non_finite_numeric_bound_is_invalid_on_its_own() {
+        assert!(numeric_bounds_are_invalid(f64::INFINITY, 1.0));
+        assert!(numeric_bounds_are_invalid(0.0, f64::INFINITY));
+        assert!(numeric_bounds_are_invalid(1.0, -1.0));
+        assert!(!numeric_bounds_are_invalid(-1.0, 1.0));
+    }
+
+    #[test]
+    fn recursive_invalid_values_charge_one_depth_level() {
+        let (source, _) = fixture();
+        for (schema, value) in [
+            (
+                json!({"properties": {"child": {"type": "string"}}}),
+                json!({"child": "valid"}),
+            ),
+            (json!({"items": {"type": "string"}}), json!(["valid"])),
+        ] {
+            assert!(
+                invalid_json_values(&source, &schema, &value, "body", MAX_GENERATION_DEPTH - 1,)
+                    .unwrap()
+                    .is_empty(),
+                "a nested invalid value crossed the generation depth limit"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_json_representatives_are_type_specific_and_bounded() {
+        let sentinel = json!("__kahea_outside_enum__");
+        assert_eq!(
+            invalid_value(&json!({"enum": ["inside"]}), &json!("inside")),
+            Some(sentinel.clone())
+        );
+        assert_eq!(
+            invalid_value(
+                &json!({"type": "string", "enum": ["__kahea_outside_enum__"]}),
+                &sentinel,
+            ),
+            Some(json!(false))
+        );
+        assert_eq!(
+            invalid_value(&json!({"type": "string", "minLength": 1}), &json!("x")),
+            Some(json!(""))
+        );
+        assert_eq!(
+            invalid_value(&json!({"type": "string", "minLength": 0}), &json!("x")),
+            Some(json!(false))
+        );
+        assert_eq!(
+            invalid_value(&json!({"type": "string", "maxLength": 2}), &json!("x")),
+            Some(json!("xxx"))
+        );
+        assert_eq!(
+            invalid_value(
+                &json!({"type": "string", "maxLength": MAX_GENERATED_STRING}),
+                &json!("x"),
+            ),
+            Some(json!(false))
+        );
+        for (kind, invalid) in [
+            ("integer", json!("not-a-number")),
+            ("number", json!("not-a-number")),
+            ("boolean", json!("not-a-boolean")),
+            ("array", json!({"not": "an-array"})),
+            ("object", json!(["not-an-object"])),
+            ("null", json!(true)),
+        ] {
+            assert_eq!(
+                invalid_value(&json!({"type": kind}), &Value::Null),
+                Some(invalid),
+                "wrong invalid representative for {kind}"
+            );
+        }
+        assert_eq!(
+            invalid_value(&json!({}), &json!("value")),
+            Some(json!(false))
+        );
+        assert_eq!(invalid_value(&json!({}), &json!(1)), None);
+    }
+
+    #[test]
+    fn invalid_parameter_scalars_are_type_specific_and_bounded() {
+        assert_eq!(
+            invalid_scalar(&json!({"enum": ["inside"]})).as_deref(),
+            Some("__kahea_outside_enum__")
+        );
+        for kind in ["integer", "number"] {
+            assert_eq!(
+                invalid_scalar(&json!({"type": kind})).as_deref(),
+                Some("not-a-number")
+            );
+        }
+        assert_eq!(
+            invalid_scalar(&json!({"type": "boolean"})).as_deref(),
+            Some("not-a-boolean")
+        );
+        assert_eq!(
+            invalid_scalar(&json!({"type": "string", "minLength": 1})),
+            Some(String::new())
+        );
+        assert_eq!(
+            invalid_scalar(&json!({"type": "string", "minLength": 0})),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_parameters_are_never_required_omissions() {
+        let spec = SPEC.replace(
+            "        - { name: verbose, in: query, required: true, schema: { type: boolean } }",
+            concat!(
+                "        - { name: verbose, in: query, required: true, schema: { type: boolean } }\n",
+                "        - { name: optional, in: query, schema: { type: boolean } }",
+            ),
+        );
+        let source = load_openapi(Path::new("conformance.yaml"), spec.as_bytes()).unwrap();
+        let operation = resolve_operation(&source, "updateWidget").unwrap();
+        let (_, plans) = build_conformance_plan(
+            &source,
+            &operation,
+            ConformanceOptions {
+                cases: 1,
+                mode: ConformanceMode::Positive,
+                plan: PlanOptions {
+                    explicit: vec![("query.optional".into(), json!(true))],
+                    ..PlanOptions::default()
+                },
+                ..ConformanceOptions::default()
+            },
+            &ProjectConfiguration::default(),
+        )
+        .unwrap();
+
+        for plan in plans {
+            let strategies: Vec<_> = negative_plans(&source, &operation, &plan)
+                .unwrap()
+                .into_iter()
+                .map(|(strategy, _)| strategy)
+                .collect();
+            assert!(
+                !strategies
+                    .iter()
+                    .any(|strategy| strategy == "omit-required-query:optional"),
+                "optional parameter was treated as required: {strategies:?}"
+            );
+        }
+    }
+
+    #[test]
     fn oracle_distinguishes_acceptance_rejection_and_server_errors() {
         fn observation(status: u16, exit: u8) -> InvocationResult {
             InvocationResult::Observation(kahea_core::Observation {
@@ -1917,8 +2284,47 @@ paths:
         }
         assert!(assess(ConformanceGeneration::Positive, &observation(200, 0)).0);
         assert!(assess(ConformanceGeneration::Negative, &observation(400, 0)).0);
-        assert!(!assess(ConformanceGeneration::Negative, &observation(200, 0)).0);
+        assert_eq!(
+            assess(ConformanceGeneration::Negative, &observation(200, 0)),
+            (
+                false,
+                Some(200),
+                "schema-invalid request was accepted".into()
+            )
+        );
+        assert_eq!(
+            assess(ConformanceGeneration::Negative, &observation(302, 0)),
+            (
+                false,
+                Some(302),
+                "invalid request rejection did not conform to the response contract".into()
+            )
+        );
         assert!(!assess(ConformanceGeneration::Positive, &observation(500, 0)).0);
+    }
+
+    #[test]
+    fn pacing_waits_only_between_cases() {
+        assert_eq!(campaign_delay(0, 0), None);
+        assert_eq!(campaign_delay(0, 1), None);
+        assert_eq!(campaign_delay(1, 0), None);
+        assert_eq!(campaign_delay(1, 1), Some(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn execution_errors_have_safe_specific_reasons() {
+        assert_eq!(
+            safe_exec_reason(&ExecError::Transport("secret detail".into())),
+            "transport failed"
+        );
+        assert_eq!(
+            safe_exec_reason(&ExecError::ResponseTooLarge(512)),
+            "response exceeded the 512 byte campaign limit"
+        );
+        assert_eq!(
+            safe_exec_reason(&ExecError::InvalidTarget("bad target".into())),
+            "invalid target URL: bad target"
+        );
     }
 
     #[test]

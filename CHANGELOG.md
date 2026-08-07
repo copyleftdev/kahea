@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+- Added a tag-driven GitHub Release pipeline for native Linux, macOS, and Windows binaries with SHA-256 checksums, CycloneDX SBOMs, third-party license notices, and signed build provenance.
+- Added public-project release hygiene: a pinned and verified Rust 1.95 MSRV, non-publishable workspace crates, license and source policy, full-history secret scanning, Dependabot, issue forms, contribution/support/conduct guidance, and an explicit security-reporting policy.
 - Added a schema-conformance suite for the case generator: every positive body and parameter is validated against the declared contract by an independent checker, declared bounds are shown to be explored across seeds, and every negative case is proven to violate the schema in the way its strategy names.
 - Added a cookie-parameter fixture and contracts for it: cookies reach the wire as one sorted header, omitting or corrupting one cookie leaves its neighbour untouched, dropping one required query parameter keeps the others, and a server as strict as the contract agrees with every generated case. Cookie mutation had no fixture anywhere and had never executed.
 - Added a generator-surface fixture and two byte-exact campaign goldens covering every schema construct the bounded generator supports, plus the optional-inclusion and supplied-baseline paths a single golden cannot reach. Goldens regenerate with `KAHEA_UPDATE_GOLDEN=1` and report the case that drifted rather than only a changed digest.

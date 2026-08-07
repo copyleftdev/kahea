@@ -1,6 +1,19 @@
 # Security
 
-Please report suspected vulnerabilities privately to the repository maintainers. Do not include live credentials, customer response bodies, or exploit traffic against systems you do not own.
+## Supported versions
+
+| Version | Supported |
+|---|---|
+| Latest GitHub release | Yes |
+| Older releases and unreleased commits | Best effort |
+
+Report suspected vulnerabilities through
+[GitHub private vulnerability reporting](https://github.com/copyleftdev/kahea/security/advisories/new).
+Do not open a public issue for a suspected vulnerability. Do not include live credentials, customer
+response bodies, or exploit traffic against systems you do not own.
+
+Maintainers will acknowledge a report within five business days, keep the reporter informed while
+validating it, and coordinate disclosure after a fix is available. No bounty is currently offered.
 
 Kāhea treats API descriptions, configuration, DNS, redirects, and remote responses as untrusted. Planning is no-network; invocation requires sealed plans and exact grants. Redirects and ambient proxies are disabled, resolved addresses are pinned after policy evaluation, and secret material is resolved only at invocation. See the security model and limitations in the README before deploying Kāhea with sensitive APIs.
 

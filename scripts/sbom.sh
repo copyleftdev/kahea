@@ -9,6 +9,14 @@ if ! cargo cyclonedx --version >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo cyclonedx --format json --all --override-filename kahea.cdx
-mv kahea.cdx.json artifacts/kahea.cdx.json
+cargo cyclonedx \
+  --manifest-path crates/kahea/Cargo.toml \
+  --format json \
+  --all \
+  --target all \
+  --override-filename kahea.cdx
+mv crates/kahea/kahea.cdx.json artifacts/kahea.cdx.json
+for generated in crates/*/kahea.cdx.json; do
+  rm -f "$generated"
+done
 echo "wrote artifacts/kahea.cdx.json"
