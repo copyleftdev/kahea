@@ -949,6 +949,7 @@ dependencies = [
 name = "kahea-ingest"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "kahea-core",
  "serde_json",
  "shell-words",
