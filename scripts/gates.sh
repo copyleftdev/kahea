@@ -7,6 +7,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p kahea
+scripts/validate-distribution.sh
 
 binary=target/release/kahea
 bytes=$(wc -c < "$binary")

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "kahea",
+  "owner": {
+    "name": "copyleftdev",
+    "url": "https://github.com/copyleftdev"
+  },
+  "description": "Agent-first API testing and deterministic invocation tools.",
+  "plugins": [
+    {
+      "name": "kahea",
+      "source": "./plugins/kahea",
+      "description": "Seal, test, and invoke APIs with exact capability grants.",
+      "version": "0.1.0",
+      "author": {
+        "name": "copyleftdev",
+        "url": "https://github.com/copyleftdev"
+      },
+      "category": "development",
+      "tags": [
+        "openapi",
+        "api-testing",
+        "mcp",
+        "ai-agents"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "kahea": {
+      "command": "kahea",
+      "args": [
+        "mcp",
+        "serve",
+        "--stdio"
+      ]
+    }
+  }
+}

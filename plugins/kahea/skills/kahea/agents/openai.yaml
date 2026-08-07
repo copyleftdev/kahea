@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $kahea to inspect an API artifact, seal the exact plan, invoke it with narrow grants, and explain only the evidence needed."
   icon_small: "./assets/kahea-crest.svg"
   icon_large: "./assets/kahea-primary.svg"
-  brand_color: "#153C44"
+  brand_color: "#A9452E"

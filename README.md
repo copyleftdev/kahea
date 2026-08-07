@@ -26,6 +26,34 @@ gh attestation verify kahea-ARCHIVE --repo copyleftdev/kahea
 Kāhea does not run an installer or modify shell configuration. Extract the archive and place the
 `kahea` binary somewhere on `PATH`.
 
+## Agent plugins
+
+This repository is an installable plugin marketplace for both Claude Code and OpenAI Codex. Install
+the verified `kahea` binary on `PATH` first; the plugin adds the agent-use skill and starts the
+local stdio MCP server without downloading code or credentials at runtime.
+
+Claude Code:
+
+```bash
+claude plugin marketplace add copyleftdev/kahea
+claude plugin install kahea@kahea
+```
+
+OpenAI Codex:
+
+```bash
+codex plugin marketplace add copyleftdev/kahea
+codex plugin add kahea@kahea
+```
+
+Both hosts load the same canonical skill and the same four MCP tools. The host configuration is
+packaged under [`plugins/kahea`](plugins/kahea); no host-specific copy of the safety workflow is
+maintained.
+
+For clients that only need MCP, configure `kahea mcp serve --stdio` directly. Release builds also
+publish self-contained, checksummed MCPB bundles and register
+`io.github.copyleftdev/kahea` with the official MCP Registry.
+
 To build from source, install Rust 1.95 or newer:
 
 ```bash
@@ -225,7 +253,9 @@ kahea mcp serve --stdio
 
 The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. Pass a `conformance` options object to `kahea_plan` to create a campaign; `kahea_invoke` executes its sealed handle. It projects the same Rust library calls as the CLI; request-plan and conformance-plan parity are integration-tested. Fixed resources expose `describe` and public schemas, while templates expose sealed plans and untrusted evidence from the default `.kahea` store. See the current [MCP schema](https://modelcontextprotocol.io/specification/2025-11-25/schema) and [stdio transport requirements](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
 
-The agent-use contract is packaged in [`skills/kahea/SKILL.md`](skills/kahea/SKILL.md): inspect, plan, review grants, invoke the sealed handle, then explain only selected evidence.
+The agent-use contract is packaged in
+[`plugins/kahea/skills/kahea/SKILL.md`](plugins/kahea/skills/kahea/SKILL.md):
+inspect, plan, review grants, invoke the sealed handle, then explain only selected evidence.
 
 ## Composition
 
