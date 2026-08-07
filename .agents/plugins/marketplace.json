@@ -1,0 +1,20 @@
+{
+  "name": "kahea",
+  "interface": {
+    "displayName": "Kāhea"
+  },
+  "plugins": [
+    {
+      "name": "kahea",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kahea"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

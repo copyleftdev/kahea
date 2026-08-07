@@ -1,0 +1,43 @@
+{
+  "name": "kahea",
+  "version": "0.1.0",
+  "description": "Deterministic OpenAPI planning, contract testing, and policy-gated API execution for AI agents.",
+  "author": {
+    "name": "copyleftdev",
+    "url": "https://github.com/copyleftdev"
+  },
+  "homepage": "https://github.com/copyleftdev/kahea",
+  "repository": "https://github.com/copyleftdev/kahea",
+  "license": "Apache-2.0",
+  "keywords": [
+    "openapi",
+    "api-testing",
+    "contract-testing",
+    "mcp",
+    "ai-agents",
+    "local-first"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Kāhea",
+    "shortDescription": "Seal, test, and invoke APIs with exact grants",
+    "longDescription": "Kāhea turns API descriptions and captured requests into sealed plans, invokes only with exact capability grants, and returns typed, replayable evidence. Its bundled skill teaches agents to preserve that boundary; its local MCP server exposes inspect, plan, invoke, and explain.",
+    "developerName": "copyleftdev",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/copyleftdev/kahea",
+    "defaultPrompt": [
+      "Inspect this OpenAPI description and show the safest operation plan.",
+      "Run deterministic contract tests for this API operation.",
+      "Invoke this sealed plan with only its required grants."
+    ],
+    "brandColor": "#A9452E",
+    "composerIcon": "./skills/kahea/assets/kahea-crest.svg",
+    "logo": "./skills/kahea/assets/kahea-primary.svg"
+  }
+}

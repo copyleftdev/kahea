@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "kahea",
+  "displayName": "Kāhea",
+  "version": "0.1.0",
+  "description": "Deterministic OpenAPI planning, contract testing, and policy-gated API execution for AI agents.",
+  "author": {
+    "name": "copyleftdev",
+    "url": "https://github.com/copyleftdev"
+  },
+  "homepage": "https://github.com/copyleftdev/kahea",
+  "repository": "https://github.com/copyleftdev/kahea",
+  "license": "Apache-2.0",
+  "keywords": [
+    "openapi",
+    "api-testing",
+    "contract-testing",
+    "mcp",
+    "ai-agents",
+    "local-first"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

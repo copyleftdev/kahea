@@ -66,6 +66,27 @@ jobs:
           cp release-metadata/kahea.cdx.json release-metadata/THIRD_PARTY_LICENSES.html "stage/$archive_base/"
           tar -C stage -czf "dist/$archive_base.tar.gz" "$archive_base"
           (cd dist && shasum -a 256 "$archive_base.tar.gz" > "$archive_base.tar.gz.sha256")
+
+          case "$RUNNER_OS" in
+            Linux) mcp_platform="linux" ;;
+            macOS) mcp_platform="darwin" ;;
+            *) echo "unsupported MCPB platform: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          mcpb_base="kahea-mcp-${RUNNER_OS}-${RUNNER_ARCH}"
+          mcpb_stage="stage/$mcpb_base"
+          mcp_entry="server/kahea"
+          mkdir -p "$mcpb_stage/server"
+          cp target/release/kahea "$mcpb_stage/$mcp_entry"
+          cp assets/brand/kahea-crest-512.png "$mcpb_stage/icon.png"
+          cp README.md LICENSE "$mcpb_stage/"
+          jq --arg platform "$mcp_platform" --arg entry "$mcp_entry" '
+            .compatibility.platforms = [$platform] |
+            .server.entry_point = $entry |
+            .server.mcp_config.command = ("${__dirname}/" + $entry)
+          ' packaging/mcpb/manifest.json > "$mcpb_stage/manifest.json"
+          chmod +x "$mcpb_stage/$mcp_entry"
+          (cd "$mcpb_stage" && zip -q -r "../../dist/$mcpb_base.mcpb" .)
+          (cd dist && shasum -a 256 "$mcpb_base.mcpb" > "$mcpb_base.mcpb.sha256")
       - name: Package Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
@@ -79,6 +100,25 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $archiveBase.zip" | Set-Content -NoNewline "$archive.sha256"
+
+          $mcpbBase = "kahea-mcp-$env:RUNNER_OS-$env:RUNNER_ARCH"
+          $mcpbStage = "stage/$mcpbBase"
+          $mcpEntry = "server/kahea.exe"
+          New-Item -ItemType Directory -Force -Path "$mcpbStage/server" | Out-Null
+          Copy-Item target/release/kahea.exe -Destination "$mcpbStage/$mcpEntry"
+          Copy-Item assets/brand/kahea-crest-512.png -Destination "$mcpbStage/icon.png"
+          Copy-Item README.md, LICENSE -Destination $mcpbStage
+          $manifest = Get-Content packaging/mcpb/manifest.json -Raw | ConvertFrom-Json
+          $manifest.compatibility.platforms = @("win32")
+          $manifest.server.entry_point = $mcpEntry
+          $manifest.server.mcp_config.command = '${__dirname}/server/kahea.exe'
+          $manifest | ConvertTo-Json -Depth 20 | Set-Content "$mcpbStage/manifest.json"
+          $mcpbZip = "dist/$mcpbBase.zip"
+          $mcpbArchive = "dist/$mcpbBase.mcpb"
+          Compress-Archive -Path "$mcpbStage/*" -DestinationPath $mcpbZip
+          Move-Item $mcpbZip $mcpbArchive
+          $mcpbHash = (Get-FileHash -Algorithm SHA256 $mcpbArchive).Hash.ToLowerInvariant()
+          "$mcpbHash  $mcpbBase.mcpb" | Set-Content -NoNewline "$mcpbArchive.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: kahea-${{ runner.os }}-${{ runner.arch }}
@@ -93,6 +133,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
         with:
           path: dist
@@ -102,6 +143,28 @@ jobs:
         with:
           name: release-metadata
           path: dist
+      - name: Generate MCP Registry release metadata
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          jq --arg version "$version" \
+            '.version = $version | .packages = []' \
+            server.json > dist/server.json
+          for bundle in dist/*.mcpb; do
+            sha=$(awk '{print $1}' "$bundle.sha256")
+            name=$(basename "$bundle")
+            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$name"
+            jq --arg identifier "$url" --arg sha "$sha" '
+              .packages += [{
+                registryType: "mcpb",
+                identifier: $identifier,
+                fileSha256: $sha,
+                transport: {type: "stdio"}
+              }]
+            ' dist/server.json > dist/server.tmp
+            mv dist/server.tmp dist/server.json
+          done
+          jq -e '.packages | length > 0' dist/server.json >/dev/null
       - uses: actions/attest@v4
         with:
           subject-path: dist/*
@@ -109,3 +172,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
+      - name: Wait for MCPB release assets
+        shell: bash
+        run: |
+          for bundle in dist/*.mcpb; do
+            name=$(basename "$bundle")
+            curl -fLI --retry 10 --retry-all-errors --retry-delay 2 \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$name"
+          done
+      - name: Install verified MCP Registry publisher
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/mcp-publisher.tar.gz"
+          curl -fL \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz \
+            -o "$archive"
+          echo "ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac  $archive" |
+            sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" mcp-publisher
+          "$RUNNER_TEMP/mcp-publisher" --version
+      - name: Publish to the official MCP Registry
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          "$RUNNER_TEMP/mcp-publisher" publish dist/server.json
