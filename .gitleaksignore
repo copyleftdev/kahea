@@ -1,0 +1,2 @@
+# Intentional path-traversal rejection fixture, not a credential.
+88607a6e43d41de738a8846bc710b03dba5188b0:crates/kahea-mcp/src/lib.rs:generic-api-key:633

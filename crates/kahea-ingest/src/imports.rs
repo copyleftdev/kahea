@@ -348,10 +348,10 @@ fn postman_v3_item(value: &Value, relative: &Path) -> Result<Value, IngestError>
             relative.display()
         ))
     })?;
-    if request.get("header").is_none() {
-        if let Some(headers) = request.remove("headers") {
-            request.insert("header".into(), headers);
-        }
+    if request.get("header").is_none()
+        && let Some(headers) = request.remove("headers")
+    {
+        request.insert("header".into(), headers);
     }
     let name = object
         .get("name")

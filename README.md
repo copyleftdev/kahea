@@ -12,12 +12,31 @@ Kāhea is a local-first, deterministic API invocation kernel for coding agents.
 
 It turns OpenAPI descriptions, request captures, and Arazzo workflows into integrity-sealed request plans. Invocation is a separate operation guarded by exact capability grants; responses become typed observations and content-addressed evidence.
 
-## Build and verify
+## Install
 
-Kāhea requires Rust 1.85 or newer.
+Download the archive for your operating system and architecture from
+[GitHub Releases](https://github.com/copyleftdev/kahea/releases). Every archive is accompanied by
+a SHA-256 checksum, a CycloneDX SBOM, and GitHub build provenance. Verify the checksum before
+installing and verify provenance with:
+
+```bash
+gh attestation verify kahea-ARCHIVE --repo copyleftdev/kahea
+```
+
+Kāhea does not run an installer or modify shell configuration. Extract the archive and place the
+`kahea` binary somewhere on `PATH`.
+
+To build from source, install Rust 1.95 or newer:
 
 ```bash
 cargo build --release -p kahea
+```
+
+## Build and verify
+
+The repository pins the release toolchain in `rust-toolchain.toml`.
+
+```bash
 scripts/gates.sh
 # Requires cargo-mutants; run locally, not in CI.
 scripts/mutation-gate.sh

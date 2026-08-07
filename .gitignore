@@ -3,3 +3,4 @@
 /mutants.out
 *.tmp
 /mutants.out.old
+/artifacts
