@@ -2,6 +2,7 @@
 
 ## 0.1.0
 
+- Added a lightweight, kinetic GitHub Pages site with synchronized Claude Code, OpenAI Codex, direct MCP, and native-binary installation pathways; the static experience scores 100 across all four Lighthouse categories.
 - Packaged Kāhea as one canonical Claude Code and OpenAI Codex plugin, added repository marketplace metadata, and added official MCP Registry discovery metadata plus checksummed, attested, platform-specific MCPB release publishing.
 - Added a tag-driven GitHub Release pipeline for native Linux, macOS, and Windows binaries with SHA-256 checksums, CycloneDX SBOMs, third-party license notices, and signed build provenance.
 - Added public-project release hygiene: a pinned and verified Rust 1.95 MSRV, non-publishable workspace crates, license and source policy, full-history secret scanning, Dependabot, issue forms, contribution/support/conduct guidance, and an explicit security-reporting policy.

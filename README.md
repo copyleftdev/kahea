@@ -6,13 +6,24 @@
 
 [![Tip my tokens](https://tokentip.to/badge/copyleftdev.svg?logo=1)](https://tokentip.to/@copyleftdev)
 
+[Website](https://copyleftdev.github.io/kahea/) ·
+[Releases](https://github.com/copyleftdev/kahea/releases) ·
+[Agent plugin](plugins/kahea) ·
+[MCP metadata](server.json)
+
 Kāhea is a local-first, deterministic API invocation kernel for coding agents.
 
 > Intent may be probabilistic. The call must be exact.
 
 It turns OpenAPI descriptions, request captures, and Arazzo workflows into integrity-sealed request plans. Invocation is a separate operation guarded by exact capability grants; responses become typed observations and content-addressed evidence.
 
-## Install
+## Install Kāhea
+
+Choose the pathway that matches your host. Claude Code, OpenAI Codex, and direct MCP clients all
+reach the same four local MCP tools and the same inspect → plan → grant → invoke → evidence safety
+contract.
+
+### 1. Install the native binary
 
 Download the archive for your operating system and architecture from
 [GitHub Releases](https://github.com/copyleftdev/kahea/releases). Every archive is accompanied by
@@ -26,33 +37,42 @@ gh attestation verify kahea-ARCHIVE --repo copyleftdev/kahea
 Kāhea does not run an installer or modify shell configuration. Extract the archive and place the
 `kahea` binary somewhere on `PATH`.
 
-## Agent plugins
+### 2a. Claude Code
 
-This repository is an installable plugin marketplace for both Claude Code and OpenAI Codex. Install
-the verified `kahea` binary on `PATH` first; the plugin adds the agent-use skill and starts the
-local stdio MCP server without downloading code or credentials at runtime.
-
-Claude Code:
+Add this repository as a marketplace, then install the plugin:
 
 ```bash
 claude plugin marketplace add copyleftdev/kahea
 claude plugin install kahea@kahea
 ```
 
-OpenAI Codex:
+### 2b. OpenAI Codex
+
+Add the same repository marketplace and canonical plugin package:
 
 ```bash
 codex plugin marketplace add copyleftdev/kahea
 codex plugin add kahea@kahea
 ```
 
-Both hosts load the same canonical skill and the same four MCP tools. The host configuration is
-packaged under [`plugins/kahea`](plugins/kahea); no host-specific copy of the safety workflow is
-maintained.
+Both plugins require the verified `kahea` binary on `PATH`. They add the canonical agent-use skill
+and start the local stdio MCP server without downloading code or credentials at runtime. The shared
+host package lives in [`plugins/kahea`](plugins/kahea); no host-specific copy of the safety workflow
+is maintained.
 
-For clients that only need MCP, configure `kahea mcp serve --stdio` directly. Release builds also
-publish self-contained, checksummed MCPB bundles and register
-`io.github.copyleftdev/kahea` with the official MCP Registry.
+### 2c. Any MCP client
+
+Configure the client to start Kāhea over stdio:
+
+```text
+command: kahea
+args: mcp serve --stdio
+```
+
+Tagged releases also publish self-contained, checksummed MCPB bundles and register
+`io.github.copyleftdev/kahea` with the [official MCP Registry](https://registry.modelcontextprotocol.io/).
+
+### Build from source
 
 To build from source, install Rust 1.95 or newer:
 

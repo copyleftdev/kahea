@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f6f1e8">
+    <meta
+      name="description"
+      content="Kāhea is a deterministic API invocation kernel for coding agents. Inspect, seal, grant, invoke, and retain typed evidence."
+    >
+    <meta name="robots" content="index, follow">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Kāhea — The Agentic Invocation Kernel">
+    <meta
+      property="og:description"
+      content="Probabilistic intent. Exact execution. Install Kāhea for Claude Code, OpenAI Codex, or any MCP client."
+    >
+    <meta property="og:url" content="https://copyleftdev.github.io/kahea/">
+    <meta property="og:image" content="https://copyleftdev.github.io/kahea/assets/kahea-social.png">
+    <meta property="og:image:alt" content="The Kāhea crest and wordmark">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="canonical" href="https://copyleftdev.github.io/kahea/">
+    <link rel="icon" href="assets/kahea-crest.svg" type="image/svg+xml">
+    <link
+      rel="preload"
+      href="assets/fonts/gabarito-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    >
+    <link
+      rel="preload"
+      href="assets/fonts/source-serif-4-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    >
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+    <title>Kāhea — The Agentic Invocation Kernel</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Kāhea home">
+        <img src="assets/kahea-crest.svg" width="36" height="36" alt="" fetchpriority="high">
+        <span>Kāhea</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#method">Method</a>
+        <a href="#install-title">Install</a>
+        <a class="repo-link" href="https://github.com/copyleftdev/kahea">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-kicker reveal">The agentic invocation kernel</div>
+        <h1 id="hero-title" class="reveal">
+          Probabilistic intent.<br>
+          <em>Exact execution.</em>
+        </h1>
+        <p class="hero-copy reveal">
+          Kāhea turns API descriptions and captured requests into sealed plans, exact grants,
+          tested invocations, and evidence an agent cannot quietly rewrite.
+        </p>
+        <div class="hero-actions reveal">
+          <a class="button button-primary" href="#install-title">Choose an install path</a>
+          <a class="button button-secondary" href="https://github.com/copyleftdev/kahea">Read the source</a>
+        </div>
+        <p class="hero-audience reveal">For testers, API designers, and mature agentic workflows.</p>
+      </section>
+
+      <section class="manifesto" aria-labelledby="manifesto-title">
+        <p class="section-index">00 / Belief</p>
+        <h2 id="manifesto-title">
+          Tools written for AI first are the evolution. The boundary between a model’s suggestion
+          and a real network call must be executable, reviewable, and exact.
+        </h2>
+      </section>
+
+      <section class="method" id="method" aria-labelledby="method-title">
+        <div class="section-heading">
+          <p class="section-index">01 / Method</p>
+          <h2 id="method-title">One computation.<br>Five legible states.</h2>
+          <p>Scroll the protocol. The particle field follows the same state changes as Kāhea.</p>
+        </div>
+
+        <div class="story-layout">
+          <div class="particle-stage" aria-hidden="true">
+            <canvas id="particle-field"></canvas>
+            <div class="particle-caption">
+              <span id="particle-step">01</span>
+              <span id="particle-label">Inspect</span>
+            </div>
+          </div>
+
+          <ol class="story-steps">
+            <li class="story-step is-active" data-particle-stage="0">
+              <span class="story-number">01</span>
+              <div>
+                <h3>Inspect</h3>
+                <p>Parse OpenAPI, Arazzo, Postman, HAR, cURL, and HTTP artifacts locally. No DNS. No request.</p>
+                <code>kahea inspect api.yaml --match invoice</code>
+              </div>
+            </li>
+            <li class="story-step" data-particle-stage="1">
+              <span class="story-number">02</span>
+              <div>
+                <h3>Plan</h3>
+                <p>Bind exact inputs into an integrity-sealed request plan with a stable fingerprint.</p>
+                <code>kahea plan api.yaml createInvoice</code>
+              </div>
+            </li>
+            <li class="story-step" data-particle-stage="2">
+              <span class="story-number">03</span>
+              <div>
+                <h3>Grant</h3>
+                <p>Review the target, method, secret references, and narrow capabilities before execution.</p>
+                <code>--grant net:api.example.com:443</code>
+              </div>
+            </li>
+            <li class="story-step" data-particle-stage="3">
+              <span class="story-number">04</span>
+              <div>
+                <h3>Invoke</h3>
+                <p>Execute only the sealed plan. Changed input, policy, or capability fails closed.</p>
+                <code>kahea invoke plan:HANDLE</code>
+              </div>
+            </li>
+            <li class="story-step" data-particle-stage="4">
+              <span class="story-number">05</span>
+              <div>
+                <h3>Evidence</h3>
+                <p>Return typed observations and content-addressed evidence—not a context-flooding response dump.</p>
+                <code>kahea explain body:HANDLE --select /id</code>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="install" id="install" aria-labelledby="install-title">
+        <div class="install-intro">
+          <p class="section-index">02 / Install</p>
+          <h2 id="install-title">One implementation.<br>Four doors.</h2>
+          <p>
+            Start with the verified native binary. Then add the host integration that matches your
+            workflow. Every route reaches the same four MCP tools and the same safety contract.
+          </p>
+        </div>
+
+        <div class="install-console">
+          <div class="install-tabs" role="tablist" aria-label="Installation pathway">
+            <button
+              type="button"
+              id="tab-claude"
+              role="tab"
+              aria-selected="true"
+              aria-controls="panel-claude"
+              tabindex="0"
+              data-install-tab="claude"
+            >Claude Code</button>
+            <button
+              type="button"
+              id="tab-codex"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-codex"
+              tabindex="-1"
+              data-install-tab="codex"
+            >OpenAI Codex</button>
+            <button
+              type="button"
+              id="tab-mcp"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-mcp"
+              tabindex="-1"
+              data-install-tab="mcp"
+            >MCP</button>
+            <button
+              type="button"
+              id="tab-binary"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-binary"
+              tabindex="-1"
+              data-install-tab="binary"
+            >Native binary</button>
+          </div>
+
+          <div class="install-panels">
+            <section id="panel-claude" role="tabpanel" aria-labelledby="tab-claude" tabindex="0">
+              <div class="pathway-meta">
+                <p class="pathway-label">Claude Code plugin</p>
+                <p>Installs the canonical Kāhea skill and connects the local stdio MCP server.</p>
+              </div>
+              <div class="code-shell">
+                <div class="code-heading"><span>Terminal</span><button class="copy-button" type="button" data-copy="code-claude">Copy commands</button></div>
+                <pre><code id="code-claude">claude plugin marketplace add copyleftdev/kahea
+claude plugin install kahea@kahea</code></pre>
+              </div>
+              <p class="pathway-note"><strong>Requires:</strong> the verified <code>kahea</code> binary on <code>PATH</code>.</p>
+            </section>
+
+            <section id="panel-codex" role="tabpanel" aria-labelledby="tab-codex" tabindex="0">
+              <div class="pathway-meta">
+                <p class="pathway-label">OpenAI Codex plugin</p>
+                <p>Loads the same agent-use contract and the same local MCP projection.</p>
+              </div>
+              <div class="code-shell">
+                <div class="code-heading"><span>Terminal</span><button class="copy-button" type="button" data-copy="code-codex">Copy commands</button></div>
+                <pre><code id="code-codex">codex plugin marketplace add copyleftdev/kahea
+codex plugin add kahea@kahea</code></pre>
+              </div>
+              <p class="pathway-note"><strong>Requires:</strong> the verified <code>kahea</code> binary on <code>PATH</code>.</p>
+            </section>
+
+            <section id="panel-mcp" role="tabpanel" aria-labelledby="tab-mcp" tabindex="0">
+              <div class="pathway-meta">
+                <p class="pathway-label">Any MCP client</p>
+                <p>Use stdio directly or discover release bundles as <code>io.github.copyleftdev/kahea</code>.</p>
+              </div>
+              <div class="code-shell">
+                <div class="code-heading"><span>Server command</span><button class="copy-button" type="button" data-copy="code-mcp">Copy command</button></div>
+                <pre><code id="code-mcp">kahea mcp serve --stdio</code></pre>
+              </div>
+              <div class="pathway-links">
+                <a href="https://registry.modelcontextprotocol.io/">Open MCP Registry <span aria-hidden="true">↗</span></a>
+                <a href="https://github.com/copyleftdev/kahea/blob/main/server.json">View server metadata <span aria-hidden="true">↗</span></a>
+              </div>
+            </section>
+
+            <section id="panel-binary" role="tabpanel" aria-labelledby="tab-binary" tabindex="0">
+              <div class="pathway-meta">
+                <p class="pathway-label">Native release</p>
+                <p>Download the archive for Linux, macOS, or Windows, then verify its GitHub provenance.</p>
+              </div>
+              <div class="code-shell">
+                <div class="code-heading"><span>Verify provenance</span><button class="copy-button" type="button" data-copy="code-binary">Copy command</button></div>
+                <pre><code id="code-binary">gh attestation verify kahea-ARCHIVE --repo copyleftdev/kahea</code></pre>
+              </div>
+              <div class="pathway-links">
+                <a class="release-link" href="https://github.com/copyleftdev/kahea/releases">Download a release <span aria-hidden="true">↓</span></a>
+              </div>
+            </section>
+          </div>
+          <p class="copy-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section class="proof" aria-labelledby="proof-title">
+        <p class="section-index">03 / Proof</p>
+        <h2 id="proof-title">Functional is not a feeling.</h2>
+        <ul class="proof-line" aria-label="Kāhea verification properties">
+          <li>Deterministic plans</li>
+          <li>Exact grants</li>
+          <li>Schema-aware tests</li>
+          <li>Replayable evidence</li>
+        </ul>
+      </section>
+
+      <section class="closing" aria-labelledby="closing-title">
+        <img src="assets/kahea-primary.svg" width="580" height="710" alt="Kāhea">
+        <div>
+          <p class="section-index">04 / Source</p>
+          <h2 id="closing-title">Let the model reason.<br>Make the call exact.</h2>
+          <a class="button button-primary" href="https://github.com/copyleftdev/kahea">Explore Kāhea on GitHub <span aria-hidden="true">↗</span></a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Kāhea · Apache-2.0</span>
+      <span>Local first. Evidence forward.</span>
+    </footer>
+  </body>
+</html>
