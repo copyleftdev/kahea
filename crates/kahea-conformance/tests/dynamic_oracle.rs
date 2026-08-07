@@ -140,9 +140,23 @@ fn a_correct_server_passes_every_generated_operation() {
     }
 }
 
+/// Every injected fault writes a well-formed HTTP response, so a transport
+/// error means the harness broke rather than the oracle firing. Without this,
+/// a fault test passes on the strength of any failure at all — which is how a
+/// platform-specific socket bug hid behind two green tests.
+fn assert_transport_was_clean(observations: &[(String, ConformanceObservation)], label: &str) {
+    for (operation, observation) in observations {
+        assert_eq!(
+            observation.transport_errors, 0,
+            "{label} on {operation} failed at the transport, not the contract"
+        );
+    }
+}
+
 #[test]
 fn a_server_that_accepts_invalid_requests_is_rejected() {
     let (observations, _) = lifecycle("accept-invalid", FaultMode::AcceptInvalid);
+    assert_transport_was_clean(&observations, "accept-invalid");
     let rejected: Vec<_> = observations
         .iter()
         .filter(|(_, observation)| observation.exit != 0 && observation.failed > 0)
@@ -170,6 +184,7 @@ fn universally_faulty_servers_fail_every_operation() {
         ("malformed-response", FaultMode::MalformedResponse),
     ] {
         let (observations, _) = lifecycle(label, fault);
+        assert_transport_was_clean(&observations, label);
         for (operation, observation) in &observations {
             assert_ne!(
                 observation.exit, 0,

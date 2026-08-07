@@ -409,6 +409,11 @@ fn serve(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // Windows hands back a socket that inherits the listener's
+                // non-blocking mode, so every read would return WouldBlock and
+                // the timeouts below would mean nothing. Linux does not inherit
+                // it, which is why this only shows up cross-platform.
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(5)))?;
                 let request = match read_request(&mut stream) {
