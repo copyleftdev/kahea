@@ -388,10 +388,11 @@ impl WebSocketPlan {
         self.secret_refs.dedup();
         self.handshake_checks.sort();
         self.handshake_checks.dedup();
-        self.sensitive_headers
-            .sort_by_key(|value| value.to_ascii_lowercase());
-        self.sensitive_headers
-            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        for value in &mut self.sensitive_headers {
+            value.make_ascii_lowercase();
+        }
+        self.sensitive_headers.sort();
+        self.sensitive_headers.dedup();
         self.redact_response_json_pointers.sort();
         self.redact_response_json_pointers.dedup();
         self.headers.sort_by(|left, right| {
@@ -1413,10 +1414,13 @@ mod tests {
 
     #[test]
     fn websocket_plan_is_canonical_and_seal_bound() {
-        let first = websocket_plan().seal().unwrap();
+        let mut first = websocket_plan();
+        first.sensitive_headers = vec!["Authorization".into(), "authorization".into()];
+        let first = first.seal().unwrap();
         let mut reordered = websocket_plan();
         reordered.required_grants.reverse();
         reordered.handshake_checks.reverse();
+        reordered.sensitive_headers = vec!["authorization".into(), "Authorization".into()];
         reordered.actions[0] = WebSocketAction::ExpectJson {
             pointer: Some("/type".into()),
             equals: Some(serde_json::json!({"a": 2, "z": 1})),
@@ -1426,6 +1430,7 @@ mod tests {
         let reordered = reordered.seal().unwrap();
         assert_eq!(first.fingerprint, reordered.fingerprint);
         assert_eq!(first.id, reordered.id);
+        assert_eq!(first.sensitive_headers, ["authorization"]);
         assert!(first.verify_seal().unwrap());
         let bytes = serde_json::to_vec(&first).unwrap();
         let restored: WebSocketPlan = serde_json::from_slice(&bytes).unwrap();
