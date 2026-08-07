@@ -8,6 +8,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p kahea
 scripts/validate-distribution.sh
+scripts/validate-site.sh
 
 binary=target/release/kahea
 bytes=$(wc -c < "$binary")
