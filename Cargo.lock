@@ -907,6 +907,7 @@ dependencies = [
 name = "kahea-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "blake3",
  "schemars",
  "serde",
