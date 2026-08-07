@@ -10,6 +10,7 @@ description.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 blake3.workspace = true
 schemars.workspace = true
 serde.workspace = true

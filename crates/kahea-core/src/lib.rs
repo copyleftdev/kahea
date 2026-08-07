@@ -1,5 +1,6 @@
 //! Stable domain types and canonical `kahea/k1` protocol envelopes.
 
+use base64::Engine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -193,6 +194,489 @@ impl RequestPlan {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WebSocketLimits {
+    pub connect_timeout_ms: u64,
+    pub action_timeout_ms: u64,
+    pub idle_timeout_ms: u64,
+    pub close_timeout_ms: u64,
+    pub total_timeout_ms: u64,
+    pub max_frame_bytes: u64,
+    pub max_message_bytes: u64,
+    pub max_inbound_frames: u64,
+    pub max_outbound_frames: u64,
+    pub max_inbound_messages: u64,
+    pub max_outbound_messages: u64,
+    pub max_inbound_bytes: u64,
+    pub max_outbound_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum WebSocketAction {
+    SendText {
+        text: String,
+    },
+    SendBinary {
+        payload_base64: String,
+    },
+    ExpectText {
+        equals: String,
+        timeout_ms: Option<u64>,
+    },
+    ExpectBinary {
+        payload_base64: String,
+        timeout_ms: Option<u64>,
+    },
+    ExpectJson {
+        pointer: Option<String>,
+        equals: Option<Value>,
+        schema: Option<Value>,
+        timeout_ms: Option<u64>,
+    },
+    Ping {
+        payload_base64: String,
+    },
+    ExpectPong {
+        payload_base64: String,
+        timeout_ms: Option<u64>,
+    },
+    Close {
+        code: u16,
+        reason: String,
+    },
+    ExpectClose {
+        codes: Vec<u16>,
+        reason: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug)]
+pub enum WebSocketPlanError {
+    Invalid(String),
+    Serialization(serde_json::Error),
+}
+
+impl std::fmt::Display for WebSocketPlanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(formatter, "invalid WebSocket plan: {reason}"),
+            Self::Serialization(error) => write!(formatter, "serialize WebSocket plan: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for WebSocketPlanError {}
+
+impl From<serde_json::Error> for WebSocketPlanError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Serialization(error)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebSocketPlan {
+    pub protocol: String,
+    pub kind: String,
+    pub version: String,
+    pub config_fingerprint: String,
+    pub policy_fingerprint: String,
+    pub source_fingerprints: Vec<String>,
+    pub id: String,
+    pub operation: String,
+    pub target: String,
+    pub risk: RiskClass,
+    pub required_grants: Vec<String>,
+    pub secret_refs: Vec<String>,
+    pub headers: Vec<PlannedHeader>,
+    pub auth: Option<PlannedAuth>,
+    pub origin: Option<String>,
+    pub subprotocols: Vec<String>,
+    pub handshake_checks: Vec<String>,
+    pub limits: WebSocketLimits,
+    pub actions: Vec<WebSocketAction>,
+    pub sensitive_headers: Vec<String>,
+    pub redact_response_json_pointers: Vec<String>,
+    pub valid: bool,
+    pub fingerprint: String,
+    pub exit: u8,
+}
+
+impl WebSocketPlan {
+    pub fn seal(mut self) -> Result<Self, WebSocketPlanError> {
+        self.normalize();
+        self.validate()?;
+        self.id.clear();
+        self.fingerprint.clear();
+        self.fingerprint = digest(&serde_json::to_vec(&self)?);
+        self.id = short_handle("plan", &[self.fingerprint.as_bytes()]);
+        Ok(self)
+    }
+
+    pub fn verify_seal(&self) -> Result<bool, serde_json::Error> {
+        let mut material = self.clone();
+        material.id.clear();
+        material.fingerprint.clear();
+        let expected = digest(&serde_json::to_vec(&material)?);
+        Ok(expected == self.fingerprint
+            && self.id == short_handle("plan", &[self.fingerprint.as_bytes()]))
+    }
+
+    pub fn validate(&self) -> Result<(), WebSocketPlanError> {
+        if self.protocol != PROTOCOL
+            || self.kind != "websocket-plan"
+            || !self.valid
+            || self.exit != 0
+        {
+            return Err(WebSocketPlanError::Invalid(
+                "protocol, kind, valid, or exit marker is inconsistent".into(),
+            ));
+        }
+        if self.actions.is_empty() {
+            return Err(WebSocketPlanError::Invalid("actions are empty".into()));
+        }
+        validate_websocket_limits(&self.limits)?;
+        validate_websocket_headers(&self.headers)?;
+        validate_subprotocols(&self.subprotocols)?;
+
+        let mut terminal_count = 0usize;
+        let mut outbound_frames = 0u64;
+        let mut outbound_messages = 0u64;
+        let mut outbound_bytes = 0u64;
+        for (index, action) in self.actions.iter().enumerate() {
+            let (frames, messages, bytes, terminal) =
+                validate_websocket_action(action, &self.limits)?;
+            outbound_frames = outbound_frames.checked_add(frames).ok_or_else(|| {
+                WebSocketPlanError::Invalid("outbound frame count overflow".into())
+            })?;
+            outbound_messages = outbound_messages.checked_add(messages).ok_or_else(|| {
+                WebSocketPlanError::Invalid("outbound message count overflow".into())
+            })?;
+            outbound_bytes = outbound_bytes.checked_add(bytes).ok_or_else(|| {
+                WebSocketPlanError::Invalid("outbound byte count overflow".into())
+            })?;
+            if terminal {
+                terminal_count += 1;
+                if index + 1 != self.actions.len() {
+                    return Err(WebSocketPlanError::Invalid(
+                        "the terminal close action must be last".into(),
+                    ));
+                }
+            }
+        }
+        if terminal_count != 1 {
+            return Err(WebSocketPlanError::Invalid(
+                "exactly one terminal close action is required".into(),
+            ));
+        }
+        if outbound_frames > self.limits.max_outbound_frames
+            || outbound_messages > self.limits.max_outbound_messages
+            || outbound_bytes > self.limits.max_outbound_bytes
+        {
+            return Err(WebSocketPlanError::Invalid(
+                "sealed outbound actions exceed the session limits".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn normalize(&mut self) {
+        self.required_grants.sort();
+        self.required_grants.dedup();
+        self.secret_refs.sort();
+        self.secret_refs.dedup();
+        self.handshake_checks.sort();
+        self.handshake_checks.dedup();
+        self.sensitive_headers
+            .sort_by_key(|value| value.to_ascii_lowercase());
+        self.sensitive_headers
+            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        self.redact_response_json_pointers.sort();
+        self.redact_response_json_pointers.dedup();
+        self.headers.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        for action in &mut self.actions {
+            match action {
+                WebSocketAction::ExpectJson { equals, schema, .. } => {
+                    if let Some(value) = equals {
+                        canonicalize_json(value);
+                    }
+                    if let Some(value) = schema {
+                        canonicalize_json(value);
+                    }
+                }
+                WebSocketAction::ExpectClose { codes, .. } => {
+                    codes.sort_unstable();
+                    codes.dedup();
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn canonicalize_json(value: &mut Value) {
+    match value {
+        Value::Array(values) => values.iter_mut().for_each(canonicalize_json),
+        Value::Object(object) => {
+            let mut fields = std::mem::take(object).into_iter().collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+            for (_, value) in &mut fields {
+                canonicalize_json(value);
+            }
+            object.extend(fields);
+        }
+        _ => {}
+    }
+}
+
+fn validate_websocket_limits(limits: &WebSocketLimits) -> Result<(), WebSocketPlanError> {
+    let values = [
+        limits.connect_timeout_ms,
+        limits.action_timeout_ms,
+        limits.idle_timeout_ms,
+        limits.close_timeout_ms,
+        limits.total_timeout_ms,
+        limits.max_frame_bytes,
+        limits.max_message_bytes,
+        limits.max_inbound_frames,
+        limits.max_outbound_frames,
+        limits.max_inbound_messages,
+        limits.max_outbound_messages,
+        limits.max_inbound_bytes,
+        limits.max_outbound_bytes,
+    ];
+    if values.contains(&0) {
+        return Err(WebSocketPlanError::Invalid(
+            "all session limits must be positive".into(),
+        ));
+    }
+    if limits.max_message_bytes < limits.max_frame_bytes
+        || limits.connect_timeout_ms > limits.total_timeout_ms
+        || limits.action_timeout_ms > limits.total_timeout_ms
+        || limits.idle_timeout_ms > limits.total_timeout_ms
+        || limits.close_timeout_ms > limits.total_timeout_ms
+    {
+        return Err(WebSocketPlanError::Invalid(
+            "session limits contradict their total or frame bounds".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_websocket_headers(headers: &[PlannedHeader]) -> Result<(), WebSocketPlanError> {
+    let protocol_owned = [
+        "host",
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "sec-websocket-extensions",
+        "content-length",
+        "transfer-encoding",
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for header in headers {
+        let name = header.name.to_ascii_lowercase();
+        if !valid_token(&header.name)
+            || header.name.contains(['\r', '\n'])
+            || header.value.contains(['\r', '\n'])
+        {
+            return Err(WebSocketPlanError::Invalid(
+                "invalid handshake header".into(),
+            ));
+        }
+        if protocol_owned.contains(&name.as_str()) {
+            return Err(WebSocketPlanError::Invalid(format!(
+                "header {:?} is owned by the WebSocket transport",
+                header.name
+            )));
+        }
+        if !names.insert(name) {
+            return Err(WebSocketPlanError::Invalid(
+                "duplicate handshake header".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_subprotocols(subprotocols: &[String]) -> Result<(), WebSocketPlanError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for protocol in subprotocols {
+        if !valid_token(protocol) || !seen.insert(protocol) {
+            return Err(WebSocketPlanError::Invalid(
+                "subprotocols must be unique RFC tokens".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn decode_canonical_base64(value: &str) -> Result<Vec<u8>, WebSocketPlanError> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| WebSocketPlanError::Invalid("payload is not valid base64".into()))?;
+    if base64::engine::general_purpose::STANDARD.encode(&decoded) != value {
+        return Err(WebSocketPlanError::Invalid(
+            "payload base64 is not canonical padded RFC 4648".into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+fn valid_close_code(code: u16) -> bool {
+    matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
+}
+
+fn validate_action_timeout(
+    timeout_ms: Option<u64>,
+    limits: &WebSocketLimits,
+) -> Result<(), WebSocketPlanError> {
+    if timeout_ms.is_some_and(|timeout| timeout == 0 || timeout > limits.action_timeout_ms) {
+        return Err(WebSocketPlanError::Invalid(
+            "action timeout must be positive and cannot loosen the session action timeout".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_websocket_action(
+    action: &WebSocketAction,
+    limits: &WebSocketLimits,
+) -> Result<(u64, u64, u64, bool), WebSocketPlanError> {
+    let message_limit = |bytes: usize| {
+        if bytes as u64 > limits.max_message_bytes || bytes as u64 > limits.max_frame_bytes {
+            Err(WebSocketPlanError::Invalid(
+                "inline message exceeds the sealed frame or message limit".into(),
+            ))
+        } else {
+            Ok(bytes as u64)
+        }
+    };
+    match action {
+        WebSocketAction::SendText { text } => Ok((1, 1, message_limit(text.len())?, false)),
+        WebSocketAction::SendBinary { payload_base64 } => Ok((
+            1,
+            1,
+            message_limit(decode_canonical_base64(payload_base64)?.len())?,
+            false,
+        )),
+        WebSocketAction::ExpectText { equals, timeout_ms } => {
+            validate_action_timeout(*timeout_ms, limits)?;
+            message_limit(equals.len())?;
+            Ok((0, 0, 0, false))
+        }
+        WebSocketAction::ExpectBinary {
+            payload_base64,
+            timeout_ms,
+        } => {
+            validate_action_timeout(*timeout_ms, limits)?;
+            message_limit(decode_canonical_base64(payload_base64)?.len())?;
+            Ok((0, 0, 0, false))
+        }
+        WebSocketAction::ExpectJson {
+            pointer,
+            equals,
+            schema,
+            timeout_ms,
+        } => {
+            validate_action_timeout(*timeout_ms, limits)?;
+            if equals.is_none() && schema.is_none() {
+                return Err(WebSocketPlanError::Invalid(
+                    "expect-json requires equals or schema".into(),
+                ));
+            }
+            if pointer.as_ref().is_some_and(|pointer| {
+                pointer.len() > 2_048 || (!pointer.is_empty() && !pointer.starts_with('/'))
+            }) {
+                return Err(WebSocketPlanError::Invalid(
+                    "expect-json pointer is not a bounded JSON Pointer".into(),
+                ));
+            }
+            for value in [equals, schema].into_iter().flatten() {
+                message_limit(serde_json::to_vec(value)?.len())?;
+            }
+            Ok((0, 0, 0, false))
+        }
+        WebSocketAction::Ping { payload_base64 } => {
+            let bytes = decode_canonical_base64(payload_base64)?.len();
+            if bytes > 125 {
+                return Err(WebSocketPlanError::Invalid(
+                    "ping payload exceeds 125 bytes".into(),
+                ));
+            }
+            Ok((1, 0, bytes as u64, false))
+        }
+        WebSocketAction::ExpectPong {
+            payload_base64,
+            timeout_ms,
+        } => {
+            validate_action_timeout(*timeout_ms, limits)?;
+            if decode_canonical_base64(payload_base64)?.len() > 125 {
+                return Err(WebSocketPlanError::Invalid(
+                    "pong payload exceeds 125 bytes".into(),
+                ));
+            }
+            Ok((0, 0, 0, false))
+        }
+        WebSocketAction::Close { code, reason } => {
+            if !valid_close_code(*code) || reason.len() > 123 {
+                return Err(WebSocketPlanError::Invalid(
+                    "invalid close code or reason".into(),
+                ));
+            }
+            Ok((1, 0, reason.len() as u64 + 2, true))
+        }
+        WebSocketAction::ExpectClose {
+            codes,
+            reason,
+            timeout_ms,
+        } => {
+            validate_action_timeout(*timeout_ms, limits)?;
+            if codes.is_empty()
+                || codes.iter().any(|code| !valid_close_code(*code))
+                || reason.as_ref().is_some_and(|reason| reason.len() > 123)
+            {
+                return Err(WebSocketPlanError::Invalid(
+                    "invalid expected close code or reason".into(),
+                ));
+            }
+            Ok((0, 0, 0, true))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
@@ -219,6 +703,79 @@ pub struct Observation {
     pub response_bytes: Option<u64>,
     pub body: Option<String>,
     pub trace: Option<String>,
+    pub resolved_origin: Option<String>,
+    pub http_version: Option<String>,
+    pub secret_refs: Vec<String>,
+    pub runtime: String,
+    pub exit: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSocketCloseInitiator {
+    Client,
+    Server,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WebSocketCloseObservation {
+    pub initiator: WebSocketCloseInitiator,
+    pub code: u16,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebSocketTerminalCause {
+    Completed,
+    HandshakeCheckFailed,
+    ExpectationFailed,
+    BudgetExhausted,
+    DnsFailure,
+    ConnectionFailure,
+    TlsFailure,
+    IoFailure,
+    ProtocolViolation,
+    UnexpectedEof,
+    ConnectTimeout,
+    ActionTimeout,
+    IdleTimeout,
+    CloseTimeout,
+    TotalTimeout,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WebSocketCounters {
+    pub inbound_frames: u64,
+    pub outbound_frames: u64,
+    pub inbound_messages: u64,
+    pub outbound_messages: u64,
+    pub inbound_bytes: u64,
+    pub outbound_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebSocketObservation {
+    pub protocol: String,
+    pub kind: String,
+    pub version: String,
+    pub config_fingerprint: String,
+    pub policy_fingerprint: String,
+    pub source_fingerprints: Vec<String>,
+    pub tool_version: String,
+    pub plan: String,
+    pub outcome: Outcome,
+    pub handshake_status: Option<u16>,
+    pub negotiated_subprotocol: Option<String>,
+    pub handshake_latency_ms: Option<f64>,
+    pub session_duration_ms: Option<f64>,
+    pub transcript: Option<String>,
+    pub handshake: Option<String>,
+    pub trace: Option<String>,
+    pub close: Option<WebSocketCloseObservation>,
+    pub terminal_cause: WebSocketTerminalCause,
+    pub counters: WebSocketCounters,
     pub resolved_origin: Option<String>,
     pub http_version: Option<String>,
     pub secret_refs: Vec<String>,
@@ -529,6 +1086,13 @@ impl DescribeEnvelope {
                 },
             );
         }
+        features.insert(
+            "websockets".into(),
+            FeatureAvailability {
+                available: false,
+                release: "release-5".into(),
+            },
+        );
 
         Self {
             protocol: PROTOCOL.into(),
@@ -581,6 +1145,8 @@ impl DescribeEnvelope {
                 "workflow-observation".into(),
                 "conformance-plan".into(),
                 "conformance-observation".into(),
+                "websocket-plan".into(),
+                "websocket-observation".into(),
                 "error".into(),
             ],
             exit_codes: vec![
@@ -642,6 +1208,8 @@ pub fn public_schema(name: &str) -> Option<Value> {
         "graph" => schemars::schema_for!(ApiGraphEnvelope),
         "plan" => schemars::schema_for!(RequestPlan),
         "observation" => schemars::schema_for!(Observation),
+        "websocket-plan" => schemars::schema_for!(WebSocketPlan),
+        "websocket-observation" => schemars::schema_for!(WebSocketObservation),
         "evidence" => schemars::schema_for!(EvidenceEnvelope),
         "explanation" => schemars::schema_for!(ExplanationEnvelope),
         "workflow-plan" => schemars::schema_for!(WorkflowPlan),
@@ -674,6 +1242,8 @@ mod tests {
             "graph",
             "plan",
             "observation",
+            "websocket-plan",
+            "websocket-observation",
             "evidence",
             "explanation",
             "workflow-plan",
@@ -728,6 +1298,9 @@ mod tests {
             assert!(feature.available);
             assert_eq!(feature.release, release);
         }
+        let websockets = &described.features["websockets"];
+        assert!(!websockets.available);
+        assert_eq!(websockets.release, "release-5");
     }
 
     #[test]
@@ -802,5 +1375,168 @@ mod tests {
         let mut identity = plan;
         identity.id = "conformance-plan:000000000000".into();
         assert!(!identity.verify_seal().unwrap());
+    }
+
+    fn websocket_plan() -> WebSocketPlan {
+        WebSocketPlan {
+            protocol: PROTOCOL.into(),
+            kind: "websocket-plan".into(),
+            version: VERSION.into(),
+            config_fingerprint: default_config_fingerprint(),
+            policy_fingerprint: digest(b"policy"),
+            source_fingerprints: vec![digest(b"source")],
+            id: String::new(),
+            operation: "op:websocket".into(),
+            target: "wss://socket.example.test/v1/events".into(),
+            risk: RiskClass::Write,
+            required_grants: vec![
+                "websocket:connect".into(),
+                "net:socket.example.test:443".into(),
+            ],
+            secret_refs: Vec::new(),
+            headers: vec![PlannedHeader {
+                name: "X-Client".into(),
+                value: "kahea".into(),
+            }],
+            auth: None,
+            origin: Some("https://client.example.test".into()),
+            subprotocols: vec!["kahea.events.v1".into()],
+            handshake_checks: vec!["extensions:none".into(), "status:101".into()],
+            limits: WebSocketLimits {
+                connect_timeout_ms: 5_000,
+                action_timeout_ms: 2_000,
+                idle_timeout_ms: 5_000,
+                close_timeout_ms: 2_000,
+                total_timeout_ms: 15_000,
+                max_frame_bytes: 1_048_576,
+                max_message_bytes: 4_194_304,
+                max_inbound_frames: 64,
+                max_outbound_frames: 64,
+                max_inbound_messages: 32,
+                max_outbound_messages: 32,
+                max_inbound_bytes: 16_777_216,
+                max_outbound_bytes: 16_777_216,
+            },
+            actions: vec![
+                WebSocketAction::ExpectJson {
+                    pointer: Some("/type".into()),
+                    equals: Some(serde_json::json!({"z": 1, "a": 2})),
+                    schema: None,
+                    timeout_ms: Some(2_000),
+                },
+                WebSocketAction::Close {
+                    code: 1000,
+                    reason: "complete".into(),
+                },
+            ],
+            sensitive_headers: vec!["authorization".into()],
+            redact_response_json_pointers: vec!["/token".into()],
+            valid: true,
+            fingerprint: String::new(),
+            exit: 0,
+        }
+    }
+
+    #[test]
+    fn websocket_plan_is_canonical_and_seal_bound() {
+        let first = websocket_plan().seal().unwrap();
+        let mut reordered = websocket_plan();
+        reordered.required_grants.reverse();
+        reordered.handshake_checks.reverse();
+        reordered.actions[0] = WebSocketAction::ExpectJson {
+            pointer: Some("/type".into()),
+            equals: Some(serde_json::json!({"a": 2, "z": 1})),
+            schema: None,
+            timeout_ms: Some(2_000),
+        };
+        let reordered = reordered.seal().unwrap();
+        assert_eq!(first.fingerprint, reordered.fingerprint);
+        assert_eq!(first.id, reordered.id);
+        assert!(first.verify_seal().unwrap());
+        let bytes = serde_json::to_vec(&first).unwrap();
+        let restored: WebSocketPlan = serde_json::from_slice(&bytes).unwrap();
+        assert!(restored.verify_seal().unwrap());
+        assert_eq!(bytes, serde_json::to_vec(&restored).unwrap());
+
+        let mut action = first.clone();
+        action.actions[0] = WebSocketAction::ExpectText {
+            equals: "different".into(),
+            timeout_ms: Some(2_000),
+        };
+        assert!(!action.verify_seal().unwrap());
+        let mut identity = first;
+        identity.id = "plan:000000000000".into();
+        assert!(!identity.verify_seal().unwrap());
+    }
+
+    #[test]
+    fn websocket_plan_validation_fails_closed() {
+        let mut empty = websocket_plan();
+        empty.actions.clear();
+        assert!(empty.seal().is_err());
+
+        let mut terminal_not_last = websocket_plan();
+        terminal_not_last.actions.reverse();
+        assert!(terminal_not_last.seal().is_err());
+
+        let mut invalid_binary = websocket_plan();
+        invalid_binary.actions.insert(
+            0,
+            WebSocketAction::SendBinary {
+                payload_base64: "not base64".into(),
+            },
+        );
+        assert!(invalid_binary.seal().is_err());
+
+        let mut invalid_close = websocket_plan();
+        invalid_close.actions.pop();
+        invalid_close.actions.push(WebSocketAction::Close {
+            code: 1006,
+            reason: String::new(),
+        });
+        assert!(invalid_close.seal().is_err());
+
+        let mut duplicate_header = websocket_plan();
+        duplicate_header.headers.push(PlannedHeader {
+            name: "x-client".into(),
+            value: "duplicate".into(),
+        });
+        assert!(duplicate_header.seal().is_err());
+
+        let mut zero_limit = websocket_plan();
+        zero_limit.limits.total_timeout_ms = 0;
+        assert!(zero_limit.seal().is_err());
+
+        let mut oversized = websocket_plan();
+        oversized.limits.max_frame_bytes = 4;
+        oversized.limits.max_message_bytes = 4;
+        oversized.actions.insert(
+            0,
+            WebSocketAction::SendText {
+                text: "too large".into(),
+            },
+        );
+        assert!(oversized.seal().is_err());
+    }
+
+    #[test]
+    fn websocket_public_schema_snapshot_is_stable() {
+        for (name, expected) in [
+            (
+                "websocket-plan",
+                "b3:19157e2ee33b733a2211e167e2e2688f5b2897c1bb2bfe61af86088e30db696e",
+            ),
+            (
+                "websocket-observation",
+                "b3:404df9bfcf0d71966cf01776df761326c6bf0ed8b4c72d2e8a9091ac03e8ca07",
+            ),
+        ] {
+            let schema = public_schema(name).unwrap();
+            assert_eq!(
+                digest(&serde_json::to_vec(&schema).unwrap()),
+                expected,
+                "{name}"
+            );
+        }
     }
 }
