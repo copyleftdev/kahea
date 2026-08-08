@@ -3,7 +3,8 @@
 mod websocket;
 
 pub use websocket::{
-    WebSocketConnectResult, WebSocketConnection, WebSocketHandshakeMetadata, connect_websocket,
+    WebSocketCancellation, WebSocketConnectResult, WebSocketConnection, WebSocketHandshakeMetadata,
+    connect_websocket, execute_websocket, execute_websocket_with_cancellation,
 };
 
 use base64::Engine;
@@ -925,6 +926,9 @@ fn validate_schema_value(
     failures: &mut Vec<String>,
     depth: usize,
 ) {
+    if failures.len() >= 64 {
+        return;
+    }
     if depth >= 64 {
         failures.push(format!("{path}: schema validation exceeded 64 levels"));
         return;

@@ -1,7 +1,8 @@
-use super::{ExecError, InvokeOptions, secret_redactions, unsafe_address};
+use super::{ExecError, InvokeOptions, secret_redactions, unsafe_address, validate_schema_value};
 use base64::Engine;
 use kahea_core::{
-    DenialEnvelope, Outcome, PROTOCOL, VERSION, WebSocketCounters, WebSocketObservation,
+    DenialEnvelope, Outcome, PROTOCOL, VERSION, WebSocketAction, WebSocketCloseInitiator,
+    WebSocketCloseObservation, WebSocketCounters, WebSocketLimits, WebSocketObservation,
     WebSocketPlan, WebSocketTerminalCause,
 };
 use kahea_evidence::EvidenceStore;
@@ -12,25 +13,229 @@ use sha1::{Digest, Sha1};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tungstenite::WebSocket;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::client::Response;
 use tungstenite::http::header::{HeaderName, HeaderValue};
 use tungstenite::http::{HeaderMap, Request};
+use tungstenite::protocol::frame::CloseFrame;
+use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::protocol::{Role, WebSocketConfig};
 use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{Error as WebSocketError, Message, WebSocket};
 use url::Url;
 
-type Socket = WebSocket<MaybeTlsStream<DeadlineTcpStream>>;
+type Transport = MaybeTlsStream<DeadlineTcpStream>;
+type Socket = WebSocket<AccountedStream<Transport>>;
+
+#[derive(Debug, Default)]
+struct WireAccounting {
+    counters: WebSocketCounters,
+    inbound_reserved_bytes: u64,
+    outbound_reserved_bytes: u64,
+    failure: Option<WebSocketTerminalCause>,
+}
+
+#[derive(Clone)]
+struct WireParser {
+    header: [u8; 14],
+    header_len: usize,
+    header_needed: usize,
+    payload_remaining: u64,
+    inbound: bool,
+}
+
+impl WireParser {
+    fn new(inbound: bool) -> Self {
+        Self {
+            header: [0; 14],
+            header_len: 0,
+            header_needed: 2,
+            payload_remaining: 0,
+            inbound,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        mut bytes: &[u8],
+        limits: &WebSocketLimits,
+        accounting: &mut WireAccounting,
+    ) -> io::Result<()> {
+        while !bytes.is_empty() {
+            if self.payload_remaining != 0 {
+                let consumed = usize::try_from(self.payload_remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(bytes.len());
+                if self.inbound {
+                    accounting.counters.inbound_bytes = accounting
+                        .counters
+                        .inbound_bytes
+                        .saturating_add(consumed as u64);
+                } else {
+                    accounting.counters.outbound_bytes = accounting
+                        .counters
+                        .outbound_bytes
+                        .saturating_add(consumed as u64);
+                }
+                self.payload_remaining -= consumed as u64;
+                bytes = &bytes[consumed..];
+                continue;
+            }
+
+            let copied = (self.header_needed - self.header_len).min(bytes.len());
+            self.header[self.header_len..self.header_len + copied]
+                .copy_from_slice(&bytes[..copied]);
+            self.header_len += copied;
+            bytes = &bytes[copied..];
+            if self.header_len == 2 {
+                let extended = match self.header[1] & 0x7f {
+                    126 => 2,
+                    127 => 8,
+                    _ => 0,
+                };
+                let masked = self.header[1] & 0x80 != 0;
+                self.header_needed = 2 + extended + usize::from(masked) * 4;
+            }
+            if self.header_len != self.header_needed {
+                continue;
+            }
+
+            let short = self.header[1] & 0x7f;
+            let payload = match short {
+                126 => u16::from_be_bytes([self.header[2], self.header[3]]) as u64,
+                127 => {
+                    if self.header[2] & 0x80 != 0 {
+                        accounting.failure = Some(WebSocketTerminalCause::ProtocolViolation);
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid WebSocket frame length",
+                        ));
+                    }
+                    u64::from_be_bytes(self.header[2..10].try_into().expect("fixed header"))
+                }
+                value => value as u64,
+            };
+            let (frames, reserved, max_frames, max_bytes) = if self.inbound {
+                (
+                    &mut accounting.counters.inbound_frames,
+                    &mut accounting.inbound_reserved_bytes,
+                    limits.max_inbound_frames,
+                    limits.max_inbound_bytes,
+                )
+            } else {
+                (
+                    &mut accounting.counters.outbound_frames,
+                    &mut accounting.outbound_reserved_bytes,
+                    limits.max_outbound_frames,
+                    limits.max_outbound_bytes,
+                )
+            };
+            if *frames >= max_frames
+                || payload > limits.max_frame_bytes
+                || reserved.saturating_add(payload) > max_bytes
+            {
+                accounting.failure = Some(WebSocketTerminalCause::BudgetExhausted);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "WebSocket wire budget exhausted",
+                ));
+            }
+            *frames += 1;
+            *reserved += payload;
+            self.payload_remaining = payload;
+            self.header_len = 0;
+            self.header_needed = 2;
+        }
+        Ok(())
+    }
+}
+
+struct AccountedStream<S> {
+    inner: S,
+    limits: WebSocketLimits,
+    accounting: Arc<Mutex<WireAccounting>>,
+    inbound: WireParser,
+    outbound: WireParser,
+}
+
+impl<S> AccountedStream<S> {
+    fn new(inner: S, limits: WebSocketLimits, accounting: Arc<Mutex<WireAccounting>>) -> Self {
+        Self {
+            inner,
+            limits,
+            accounting,
+            inbound: WireParser::new(true),
+            outbound: WireParser::new(false),
+        }
+    }
+
+    fn observe_buffered_inbound(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let mut accounting = self
+            .accounting
+            .lock()
+            .map_err(|_| io::Error::other("WebSocket accounting state failed"))?;
+        self.inbound.observe(bytes, &self.limits, &mut accounting)
+    }
+}
+
+impl<S: Read> Read for AccountedStream<S> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read != 0 {
+            let mut accounting = self
+                .accounting
+                .lock()
+                .map_err(|_| io::Error::other("WebSocket accounting state failed"))?;
+            self.inbound
+                .observe(&buffer[..read], &self.limits, &mut accounting)?;
+        }
+        Ok(read)
+    }
+}
+
+impl<S: Write> Write for AccountedStream<S> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let mut accounting = self
+            .accounting
+            .lock()
+            .map_err(|_| io::Error::other("WebSocket accounting state failed"))?;
+        self.outbound
+            .observe(buffer, &self.limits, &mut accounting)?;
+        drop(accounting);
+        self.inner.write_all(buffer)?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 pub struct WebSocketConnection {
     pub metadata: WebSocketHandshakeMetadata,
-    pub(crate) socket: Socket,
-    pub(crate) deadline: Arc<Mutex<Instant>>,
-    pub(crate) started: Instant,
+    socket: Socket,
+    deadline: Arc<Mutex<DeadlineState>>,
+    started: Instant,
     total_deadline: Instant,
+    accounting: Arc<Mutex<WireAccounting>>,
+}
+
+#[derive(Clone, Default)]
+pub struct WebSocketCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl WebSocketCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 impl WebSocketConnection {
@@ -50,7 +255,10 @@ impl WebSocketConnection {
             .deadline
             .lock()
             .map_err(|_| ExecError::Transport("WebSocket deadline state failed".into()))? =
-            requested.min(self.total_deadline);
+            DeadlineState::fixed(
+                requested.min(self.total_deadline),
+                WebSocketTerminalCause::ActionTimeout,
+            );
         Ok(())
     }
 }
@@ -90,11 +298,55 @@ pub fn connect_websocket(
     connect_websocket_resolving(plan, options, store, &system_resolve)
 }
 
+/// Execute every sealed action in a WebSocket plan and persist exactly one terminal result.
+pub fn execute_websocket(
+    plan: &WebSocketPlan,
+    options: &InvokeOptions,
+    store: &EvidenceStore,
+) -> Result<WebSocketConnectResult, ExecError> {
+    match connect_websocket(plan, options, store)? {
+        WebSocketConnectResult::Connected(connection) => {
+            execute_connected_websocket(plan, *connection, store)
+        }
+        terminal => Ok(terminal),
+    }
+}
+
+pub fn execute_websocket_with_cancellation(
+    plan: &WebSocketPlan,
+    options: &InvokeOptions,
+    store: &EvidenceStore,
+    cancellation: &WebSocketCancellation,
+) -> Result<WebSocketConnectResult, ExecError> {
+    match connect_websocket_resolving_cancellable(
+        plan,
+        options,
+        store,
+        &system_resolve,
+        Some(Arc::clone(&cancellation.cancelled)),
+    )? {
+        WebSocketConnectResult::Connected(connection) => {
+            execute_connected_websocket(plan, *connection, store)
+        }
+        terminal => Ok(terminal),
+    }
+}
+
 fn connect_websocket_resolving(
     plan: &WebSocketPlan,
     options: &InvokeOptions,
     store: &EvidenceStore,
     resolver: &dyn Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
+) -> Result<WebSocketConnectResult, ExecError> {
+    connect_websocket_resolving_cancellable(plan, options, store, resolver, None)
+}
+
+fn connect_websocket_resolving_cancellable(
+    plan: &WebSocketPlan,
+    options: &InvokeOptions,
+    store: &EvidenceStore,
+    resolver: &dyn Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<WebSocketConnectResult, ExecError> {
     if !plan.verify_seal()? {
         return Err(ExecError::InvalidSeal);
@@ -127,6 +379,20 @@ fn connect_websocket_resolving(
     }
 
     let started = Instant::now();
+    if cancellation
+        .as_ref()
+        .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    {
+        return failed_observation(
+            plan,
+            store,
+            started,
+            Outcome::Error,
+            WebSocketTerminalCause::Cancelled,
+            3,
+            FailureDetails::default(),
+        );
+    }
     let total_deadline = deadline(started, plan.limits.total_timeout_ms);
     let connect_deadline = deadline(started, plan.limits.connect_timeout_ms).min(total_deadline);
     let target =
@@ -199,8 +465,11 @@ fn connect_websocket_resolving(
         }
     };
 
-    let deadline_handle = Arc::new(Mutex::new(connect_deadline));
-    let stream = DeadlineTcpStream::new(stream, Arc::clone(&deadline_handle));
+    let deadline_handle = Arc::new(Mutex::new(DeadlineState::fixed(
+        connect_deadline,
+        WebSocketTerminalCause::ConnectTimeout,
+    )));
+    let stream = DeadlineTcpStream::new(stream, Arc::clone(&deadline_handle), cancellation);
     let config = websocket_config(plan)?;
     let stream = match websocket_stream(stream, &target, tls) {
         Ok(stream) => stream,
@@ -220,7 +489,15 @@ fn connect_websocket_resolving(
             );
         }
     };
-    let handshake = perform_upgrade(request, stream, config, target.scheme() == "wss");
+    let accounting = Arc::new(Mutex::new(WireAccounting::default()));
+    let handshake = perform_upgrade(
+        request,
+        stream,
+        config,
+        target.scheme() == "wss",
+        plan.limits.clone(),
+        Arc::clone(&accounting),
+    );
     let (socket, response) = match handshake {
         Ok(result) => result,
         Err(failure) => {
@@ -262,7 +539,7 @@ fn connect_websocket_resolving(
     *deadline_handle
         .lock()
         .map_err(|_| ExecError::Transport("WebSocket deadline state failed".into()))? =
-        total_deadline;
+        DeadlineState::fixed(total_deadline, WebSocketTerminalCause::TotalTimeout);
     let metadata = WebSocketHandshakeMetadata {
         status: response.status().as_u16(),
         negotiated_subprotocol: selected_subprotocol(&response),
@@ -279,8 +556,610 @@ fn connect_websocket_resolving(
             deadline: deadline_handle,
             started,
             total_deadline,
+            accounting,
         },
     )))
+}
+
+#[derive(Debug)]
+struct SessionTerminal {
+    outcome: Outcome,
+    cause: WebSocketTerminalCause,
+    exit: u8,
+    close: Option<WebSocketCloseObservation>,
+}
+
+impl SessionTerminal {
+    fn passed(close: Option<WebSocketCloseObservation>) -> Self {
+        Self {
+            outcome: Outcome::Passed,
+            cause: WebSocketTerminalCause::Completed,
+            exit: 0,
+            close,
+        }
+    }
+
+    fn failed(cause: WebSocketTerminalCause) -> Self {
+        Self {
+            outcome: Outcome::Failed,
+            cause,
+            exit: 1,
+            close: None,
+        }
+    }
+
+    fn error(cause: WebSocketTerminalCause) -> Self {
+        Self {
+            outcome: Outcome::Error,
+            cause,
+            exit: 3,
+            close: None,
+        }
+    }
+}
+
+fn execute_connected_websocket(
+    plan: &WebSocketPlan,
+    mut connection: WebSocketConnection,
+    store: &EvidenceStore,
+) -> Result<WebSocketConnectResult, ExecError> {
+    let mut counters = WebSocketCounters::default();
+    let mut terminal = None;
+    for action in &plan.actions {
+        let action_deadline = action_deadline(&connection, plan, action);
+        let result = match action {
+            WebSocketAction::SendText { text } => send_message(
+                &mut connection,
+                plan,
+                &mut counters,
+                Message::Text(text.clone().into()),
+                true,
+                text.len() as u64,
+                action_deadline,
+            )
+            .map(|()| None),
+            WebSocketAction::SendBinary { payload_base64 } => {
+                let payload =
+                    decode_sealed_base64(payload_base64).map_err(|()| ExecError::InvalidSeal)?;
+                let bytes = payload.len() as u64;
+                send_message(
+                    &mut connection,
+                    plan,
+                    &mut counters,
+                    Message::Binary(payload.into()),
+                    true,
+                    bytes,
+                    action_deadline,
+                )
+                .map(|()| None)
+            }
+            WebSocketAction::Ping { payload_base64 } => {
+                let payload =
+                    decode_sealed_base64(payload_base64).map_err(|()| ExecError::InvalidSeal)?;
+                let bytes = payload.len() as u64;
+                send_message(
+                    &mut connection,
+                    plan,
+                    &mut counters,
+                    Message::Ping(payload.into()),
+                    false,
+                    bytes,
+                    action_deadline,
+                )
+                .map(|()| None)
+            }
+            WebSocketAction::Close { code, reason } => {
+                execute_client_close(&mut connection, plan, &mut counters, *code, reason).map(
+                    |()| {
+                        Some(WebSocketCloseObservation {
+                            initiator: WebSocketCloseInitiator::Client,
+                            code: *code,
+                            reason: reason.clone(),
+                        })
+                    },
+                )
+            }
+            expectation => read_expectation(
+                &mut connection,
+                plan,
+                &mut counters,
+                expectation,
+                action_deadline,
+            ),
+        };
+        match result {
+            Ok(Some(close)) => {
+                terminal = Some(SessionTerminal::passed(Some(close)));
+                break;
+            }
+            Ok(None) => {}
+            Err(result) => {
+                terminal = Some(result);
+                break;
+            }
+        }
+    }
+    let terminal = terminal.unwrap_or_else(|| SessionTerminal::passed(None));
+    finish_session(plan, connection, store, counters, terminal)
+}
+
+fn action_deadline(
+    connection: &WebSocketConnection,
+    plan: &WebSocketPlan,
+    action: &WebSocketAction,
+) -> Instant {
+    let timeout = match action {
+        WebSocketAction::ExpectText { timeout_ms, .. }
+        | WebSocketAction::ExpectBinary { timeout_ms, .. }
+        | WebSocketAction::ExpectJson { timeout_ms, .. }
+        | WebSocketAction::ExpectPong { timeout_ms, .. }
+        | WebSocketAction::ExpectClose { timeout_ms, .. } => {
+            timeout_ms.unwrap_or(plan.limits.action_timeout_ms)
+        }
+        WebSocketAction::Close { .. } => plan.limits.close_timeout_ms,
+        _ => plan.limits.action_timeout_ms,
+    };
+    deadline(Instant::now(), timeout).min(connection.total_deadline)
+}
+
+fn configure_session_deadline(
+    connection: &WebSocketConnection,
+    plan: &WebSocketPlan,
+    phase_deadline: Instant,
+    phase_cause: WebSocketTerminalCause,
+) -> Result<WebSocketTerminalCause, ExecError> {
+    let idle_deadline = deadline(Instant::now(), plan.limits.idle_timeout_ms);
+    let (active_deadline, cause) = select_deadline(
+        connection.total_deadline,
+        phase_deadline,
+        idle_deadline,
+        phase_cause,
+    );
+    *connection
+        .deadline
+        .lock()
+        .map_err(|_| ExecError::Transport("WebSocket deadline state failed".into()))? =
+        DeadlineState {
+            active_deadline,
+            total_deadline: connection.total_deadline,
+            phase_deadline,
+            idle_timeout: Some(Duration::from_millis(plan.limits.idle_timeout_ms)),
+            phase_cause,
+            cause,
+        };
+    Ok(cause)
+}
+
+fn select_deadline(
+    total_deadline: Instant,
+    phase_deadline: Instant,
+    idle_deadline: Instant,
+    phase_cause: WebSocketTerminalCause,
+) -> (Instant, WebSocketTerminalCause) {
+    if total_deadline <= phase_deadline && total_deadline <= idle_deadline {
+        (total_deadline, WebSocketTerminalCause::TotalTimeout)
+    } else if phase_deadline <= idle_deadline {
+        (phase_deadline, phase_cause)
+    } else {
+        (idle_deadline, WebSocketTerminalCause::IdleTimeout)
+    }
+}
+
+fn send_message(
+    connection: &mut WebSocketConnection,
+    plan: &WebSocketPlan,
+    counters: &mut WebSocketCounters,
+    message: Message,
+    data_message: bool,
+    payload_bytes: u64,
+    phase_deadline: Instant,
+) -> Result<(), SessionTerminal> {
+    if exceeds_outbound(plan, counters, data_message, payload_bytes) {
+        return Err(SessionTerminal::failed(
+            WebSocketTerminalCause::BudgetExhausted,
+        ));
+    }
+    let phase_cause = if matches!(message, Message::Close(_)) {
+        WebSocketTerminalCause::CloseTimeout
+    } else {
+        WebSocketTerminalCause::ActionTimeout
+    };
+    let timeout_cause = configure_session_deadline(connection, plan, phase_deadline, phase_cause)
+        .map_err(|_| SessionTerminal::error(WebSocketTerminalCause::IoFailure))?;
+    if let Err(error) = connection.socket.send(message) {
+        return Err(socket_error(connection, error, timeout_cause));
+    }
+    sync_wire_counters(connection, counters)?;
+    if data_message {
+        counters.outbound_messages += 1;
+    }
+    Ok(())
+}
+
+fn read_expectation(
+    connection: &mut WebSocketConnection,
+    plan: &WebSocketPlan,
+    counters: &mut WebSocketCounters,
+    action: &WebSocketAction,
+    phase_deadline: Instant,
+) -> Result<Option<WebSocketCloseObservation>, SessionTerminal> {
+    loop {
+        let timeout_cause = configure_session_deadline(
+            connection,
+            plan,
+            phase_deadline,
+            WebSocketTerminalCause::ActionTimeout,
+        )
+        .map_err(|_| SessionTerminal::error(WebSocketTerminalCause::IoFailure))?;
+        let message = match connection.socket.read() {
+            Ok(message) => message,
+            Err(error) => return Err(socket_error(connection, error, timeout_cause)),
+        };
+        sync_wire_counters(connection, counters)?;
+        account_inbound(plan, counters, &message)?;
+        match message {
+            Message::Ping(payload) => {
+                account_automatic_control(plan, counters, payload.len() as u64)?;
+                let timeout_cause = configure_session_deadline(
+                    connection,
+                    plan,
+                    phase_deadline,
+                    WebSocketTerminalCause::ActionTimeout,
+                )
+                .map_err(|_| SessionTerminal::error(WebSocketTerminalCause::IoFailure))?;
+                if let Err(error) = connection.socket.flush() {
+                    return Err(socket_error(connection, error, timeout_cause));
+                }
+                sync_wire_counters(connection, counters)?;
+            }
+            Message::Pong(payload) => {
+                if let WebSocketAction::ExpectPong { payload_base64, .. } = action
+                    && payload.as_ref()
+                        == decode_sealed_base64(payload_base64)
+                            .map_err(|()| {
+                                SessionTerminal::error(WebSocketTerminalCause::ProtocolViolation)
+                            })?
+                            .as_slice()
+                {
+                    return Ok(None);
+                }
+            }
+            Message::Text(actual) => {
+                return if expectation_matches_text(action, actual.as_str()) {
+                    Ok(None)
+                } else {
+                    Err(SessionTerminal::failed(
+                        WebSocketTerminalCause::ExpectationFailed,
+                    ))
+                };
+            }
+            Message::Binary(actual) => {
+                return if let WebSocketAction::ExpectBinary { payload_base64, .. } = action
+                    && actual.as_ref()
+                        == decode_sealed_base64(payload_base64)
+                            .map_err(|()| {
+                                SessionTerminal::error(WebSocketTerminalCause::ProtocolViolation)
+                            })?
+                            .as_slice()
+                {
+                    Ok(None)
+                } else {
+                    Err(SessionTerminal::failed(
+                        WebSocketTerminalCause::ExpectationFailed,
+                    ))
+                };
+            }
+            Message::Close(frame) => {
+                let close = close_observation(WebSocketCloseInitiator::Server, frame.as_ref());
+                account_automatic_control(plan, counters, close_payload_bytes(frame.as_ref()))?;
+                if let Err(error) = connection.socket.flush() {
+                    return Err(socket_error(connection, error, timeout_cause));
+                }
+                sync_wire_counters(connection, counters)?;
+                return if let WebSocketAction::ExpectClose { codes, reason, .. } = action
+                    && close_matches(frame.as_ref(), codes, reason.as_deref())
+                {
+                    Ok(Some(close))
+                } else {
+                    Err(SessionTerminal {
+                        outcome: Outcome::Failed,
+                        cause: WebSocketTerminalCause::ExpectationFailed,
+                        exit: 1,
+                        close: Some(close),
+                    })
+                };
+            }
+            Message::Frame(_) => {
+                return Err(SessionTerminal::error(
+                    WebSocketTerminalCause::ProtocolViolation,
+                ));
+            }
+        }
+    }
+}
+
+fn execute_client_close(
+    connection: &mut WebSocketConnection,
+    plan: &WebSocketPlan,
+    counters: &mut WebSocketCounters,
+    code: u16,
+    reason: &str,
+) -> Result<(), SessionTerminal> {
+    let phase_deadline =
+        deadline(Instant::now(), plan.limits.close_timeout_ms).min(connection.total_deadline);
+    let frame = CloseFrame {
+        code: CloseCode::from(code),
+        reason: reason.to_owned().into(),
+    };
+    send_message(
+        connection,
+        plan,
+        counters,
+        Message::Close(Some(frame)),
+        false,
+        reason.len() as u64 + 2,
+        phase_deadline,
+    )?;
+    loop {
+        let timeout_cause = configure_session_deadline(
+            connection,
+            plan,
+            phase_deadline,
+            WebSocketTerminalCause::CloseTimeout,
+        )
+        .map_err(|_| SessionTerminal::error(WebSocketTerminalCause::IoFailure))?;
+        match connection.socket.read() {
+            Ok(message) => {
+                sync_wire_counters(connection, counters)?;
+                account_inbound(plan, counters, &message)?;
+                match message {
+                    Message::Ping(payload) => {
+                        account_automatic_control(plan, counters, payload.len() as u64)?;
+                        if let Err(error) = connection.socket.flush() {
+                            return Err(socket_error(connection, error, timeout_cause));
+                        }
+                        sync_wire_counters(connection, counters)?;
+                    }
+                    Message::Close(_) => return Ok(()),
+                    Message::Pong(_) => {}
+                    Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
+                        return Err(SessionTerminal::failed(
+                            WebSocketTerminalCause::ExpectationFailed,
+                        ));
+                    }
+                }
+            }
+            Err(WebSocketError::ConnectionClosed) => return Ok(()),
+            Err(error) => return Err(socket_error(connection, error, timeout_cause)),
+        }
+    }
+}
+
+fn decode_sealed_base64(value: &str) -> Result<Vec<u8>, ()> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| ())
+}
+
+fn expectation_matches_text(action: &WebSocketAction, text: &str) -> bool {
+    match action {
+        WebSocketAction::ExpectText { equals, .. } => text == equals,
+        WebSocketAction::ExpectJson {
+            pointer,
+            equals,
+            schema,
+            ..
+        } => serde_json::from_str::<Value>(text).is_ok_and(|document| {
+            let Some(value) = pointer
+                .as_deref()
+                .map_or(Some(&document), |pointer| document.pointer(pointer))
+            else {
+                return false;
+            };
+            if equals.as_ref().is_some_and(|expected| expected != value) {
+                return false;
+            }
+            if let Some(schema) = schema {
+                let mut failures = Vec::new();
+                validate_schema_value(schema, schema, value, "$", &mut failures, 0);
+                failures.is_empty()
+            } else {
+                true
+            }
+        }),
+        _ => false,
+    }
+}
+
+fn account_inbound(
+    plan: &WebSocketPlan,
+    counters: &mut WebSocketCounters,
+    message: &Message,
+) -> Result<(), SessionTerminal> {
+    let (data_message, bytes) = match message {
+        Message::Text(value) => (true, value.len() as u64),
+        Message::Binary(value) => (true, value.len() as u64),
+        Message::Ping(value) | Message::Pong(value) => (false, value.len() as u64),
+        Message::Close(frame) => (false, close_payload_bytes(frame.as_ref())),
+        Message::Frame(frame) => (false, frame.payload().len() as u64),
+    };
+    if data_message {
+        counters.inbound_messages = counters.inbound_messages.saturating_add(1);
+    }
+    if counters.inbound_messages > plan.limits.max_inbound_messages
+        || bytes > plan.limits.max_message_bytes
+    {
+        Err(SessionTerminal::failed(
+            WebSocketTerminalCause::BudgetExhausted,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn account_automatic_control(
+    plan: &WebSocketPlan,
+    counters: &mut WebSocketCounters,
+    bytes: u64,
+) -> Result<(), SessionTerminal> {
+    if exceeds_outbound(plan, counters, false, bytes) {
+        return Err(SessionTerminal::failed(
+            WebSocketTerminalCause::BudgetExhausted,
+        ));
+    }
+    Ok(())
+}
+
+fn exceeds_outbound(
+    plan: &WebSocketPlan,
+    counters: &WebSocketCounters,
+    data_message: bool,
+    bytes: u64,
+) -> bool {
+    counters.outbound_frames >= plan.limits.max_outbound_frames
+        || counters.outbound_bytes.saturating_add(bytes) > plan.limits.max_outbound_bytes
+        || (data_message && counters.outbound_messages >= plan.limits.max_outbound_messages)
+        || bytes > plan.limits.max_frame_bytes
+}
+
+fn close_payload_bytes(frame: Option<&CloseFrame>) -> u64 {
+    frame.map_or(0, |frame| frame.reason.len() as u64 + 2)
+}
+
+fn close_matches(frame: Option<&CloseFrame>, codes: &[u16], reason: Option<&str>) -> bool {
+    let code = frame.map_or(1005, |frame| u16::from(frame.code));
+    codes.contains(&code)
+        && reason.is_none_or(|reason| frame.is_some_and(|frame| frame.reason == reason))
+}
+
+fn close_observation(
+    initiator: WebSocketCloseInitiator,
+    frame: Option<&CloseFrame>,
+) -> WebSocketCloseObservation {
+    WebSocketCloseObservation {
+        initiator,
+        code: frame.map_or(1005, |frame| u16::from(frame.code)),
+        reason: frame.map_or_else(String::new, |frame| frame.reason.to_string()),
+    }
+}
+
+fn sync_wire_counters(
+    connection: &WebSocketConnection,
+    counters: &mut WebSocketCounters,
+) -> Result<(), SessionTerminal> {
+    let accounting = connection
+        .accounting
+        .lock()
+        .map_err(|_| SessionTerminal::error(WebSocketTerminalCause::IoFailure))?;
+    counters.inbound_frames = accounting.counters.inbound_frames;
+    counters.outbound_frames = accounting.counters.outbound_frames;
+    counters.inbound_bytes = accounting.counters.inbound_bytes;
+    counters.outbound_bytes = accounting.counters.outbound_bytes;
+    if let Some(cause) = accounting.failure {
+        return Err(if cause == WebSocketTerminalCause::BudgetExhausted {
+            SessionTerminal::failed(cause)
+        } else {
+            SessionTerminal::error(cause)
+        });
+    }
+    Ok(())
+}
+
+fn socket_error(
+    connection: &WebSocketConnection,
+    error: WebSocketError,
+    timeout: WebSocketTerminalCause,
+) -> SessionTerminal {
+    let timeout = connection
+        .deadline
+        .lock()
+        .map(|deadline| deadline.cause)
+        .unwrap_or(timeout);
+    if let Ok(accounting) = connection.accounting.lock()
+        && let Some(cause) = accounting.failure
+    {
+        return if cause == WebSocketTerminalCause::BudgetExhausted {
+            SessionTerminal::failed(cause)
+        } else {
+            SessionTerminal::error(cause)
+        };
+    }
+    match error {
+        WebSocketError::Io(error) if error.kind() == io::ErrorKind::Interrupted => {
+            SessionTerminal::error(WebSocketTerminalCause::Cancelled)
+        }
+        WebSocketError::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            SessionTerminal::error(timeout)
+        }
+        WebSocketError::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            SessionTerminal::error(WebSocketTerminalCause::UnexpectedEof)
+        }
+        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => {
+            SessionTerminal::error(WebSocketTerminalCause::UnexpectedEof)
+        }
+        WebSocketError::Capacity(_) | WebSocketError::WriteBufferFull(_) => {
+            SessionTerminal::failed(WebSocketTerminalCause::BudgetExhausted)
+        }
+        WebSocketError::Protocol(_) | WebSocketError::Utf8(_) | WebSocketError::AttackAttempt => {
+            SessionTerminal::error(WebSocketTerminalCause::ProtocolViolation)
+        }
+        _ => SessionTerminal::error(WebSocketTerminalCause::IoFailure),
+    }
+}
+
+fn finish_session(
+    plan: &WebSocketPlan,
+    connection: WebSocketConnection,
+    store: &EvidenceStore,
+    mut counters: WebSocketCounters,
+    terminal: SessionTerminal,
+) -> Result<WebSocketConnectResult, ExecError> {
+    if let Ok(accounting) = connection.accounting.lock() {
+        counters.inbound_frames = accounting.counters.inbound_frames;
+        counters.outbound_frames = accounting.counters.outbound_frames;
+        counters.inbound_bytes = accounting.counters.inbound_bytes;
+        counters.outbound_bytes = accounting.counters.outbound_bytes;
+    }
+    let observation = WebSocketObservation {
+        protocol: PROTOCOL.into(),
+        kind: "websocket-observation".into(),
+        version: VERSION.into(),
+        config_fingerprint: plan.config_fingerprint.clone(),
+        policy_fingerprint: plan.policy_fingerprint.clone(),
+        source_fingerprints: plan.source_fingerprints.clone(),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+        plan: plan.id.clone(),
+        outcome: terminal.outcome,
+        handshake_status: Some(connection.metadata.status),
+        negotiated_subprotocol: connection.metadata.negotiated_subprotocol,
+        handshake_latency_ms: Some(connection.metadata.latency.as_secs_f64() * 1_000.0),
+        session_duration_ms: Some(connection.started.elapsed().as_secs_f64() * 1_000.0),
+        transcript: None,
+        handshake: Some(connection.metadata.handshake),
+        trace: Some(connection.metadata.trace),
+        close: terminal.close,
+        terminal_cause: terminal.cause,
+        counters,
+        resolved_origin: Some(connection.metadata.resolved_origin.to_string()),
+        http_version: Some(connection.metadata.http_version),
+        secret_refs: plan.secret_refs.clone(),
+        runtime: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        exit: terminal.exit,
+    };
+    store.persist_websocket_observation(&observation)?;
+    Ok(WebSocketConnectResult::Observation(Box::new(observation)))
 }
 
 fn is_address_dependent_grant(grant: &str) -> bool {
@@ -602,9 +1481,11 @@ fn websocket_stream(
 
 fn perform_upgrade(
     request: Request<()>,
-    mut stream: MaybeTlsStream<DeadlineTcpStream>,
+    mut stream: Transport,
     config: WebSocketConfig,
     tls: bool,
+    limits: WebSocketLimits,
+    accounting: Arc<Mutex<WireAccounting>>,
 ) -> Result<(Socket, Response), HandshakeFailure> {
     let key = request
         .headers()
@@ -762,6 +1643,10 @@ fn perform_upgrade(
         });
     }
     let buffered = received[header_end..].to_vec();
+    let mut stream = AccountedStream::new(stream, limits, accounting);
+    stream
+        .observe_buffered_inbound(&buffered)
+        .map_err(|error| io_handshake_failure(error, tls))?;
     let socket = WebSocket::from_partially_read(stream, buffered, Role::Client, Some(config));
     Ok((socket, response))
 }
@@ -863,7 +1748,9 @@ fn handshake_check_failure() -> HandshakeFailure {
 }
 
 fn io_handshake_failure(error: io::Error, tls: bool) -> HandshakeFailure {
-    let cause = if matches!(
+    let cause = if error.kind() == io::ErrorKind::Interrupted {
+        WebSocketTerminalCause::Cancelled
+    } else if matches!(
         error.kind(),
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
     ) {
@@ -1006,37 +1893,137 @@ fn deadline(started: Instant, milliseconds: u64) -> Instant {
         .unwrap_or(started)
 }
 
+#[derive(Clone, Copy)]
+struct DeadlineState {
+    active_deadline: Instant,
+    total_deadline: Instant,
+    phase_deadline: Instant,
+    idle_timeout: Option<Duration>,
+    phase_cause: WebSocketTerminalCause,
+    cause: WebSocketTerminalCause,
+}
+
+impl DeadlineState {
+    fn fixed(deadline: Instant, cause: WebSocketTerminalCause) -> Self {
+        Self {
+            active_deadline: deadline,
+            total_deadline: deadline,
+            phase_deadline: deadline,
+            idle_timeout: None,
+            phase_cause: cause,
+            cause,
+        }
+    }
+
+    fn note_activity(&mut self) {
+        let Some(idle_timeout) = self.idle_timeout else {
+            return;
+        };
+        let idle_deadline = deadline(Instant::now(), idle_timeout.as_millis() as u64);
+        (self.active_deadline, self.cause) = select_deadline(
+            self.total_deadline,
+            self.phase_deadline,
+            idle_deadline,
+            self.phase_cause,
+        );
+    }
+}
+
 pub(crate) struct DeadlineTcpStream {
     stream: TcpStream,
-    deadline: Arc<Mutex<Instant>>,
+    deadline: Arc<Mutex<DeadlineState>>,
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl DeadlineTcpStream {
-    fn new(stream: TcpStream, deadline: Arc<Mutex<Instant>>) -> Self {
-        Self { stream, deadline }
+    fn new(
+        stream: TcpStream,
+        deadline: Arc<Mutex<DeadlineState>>,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self {
+            stream,
+            deadline,
+            cancellation,
+        }
     }
 
     fn remaining(&self) -> io::Result<Duration> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "WebSocket session cancelled",
+            ));
+        }
+        let remaining = self
+            .deadline
+            .lock()
+            .map_err(|_| io::Error::other("deadline state failed"))?
+            .active_deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "WebSocket deadline elapsed"))?;
+        Ok(if self.cancellation.is_some() {
+            remaining.min(Duration::from_millis(25))
+        } else {
+            remaining
+        })
+    }
+
+    fn note_activity(&self) -> io::Result<()> {
         self.deadline
             .lock()
             .map_err(|_| io::Error::other("deadline state failed"))?
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "WebSocket deadline elapsed"))
+            .note_activity();
+        Ok(())
     }
 }
 
 impl Read for DeadlineTcpStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        self.stream.read(buffer).map_err(normalize_timeout)
+        loop {
+            self.stream.set_read_timeout(Some(self.remaining()?))?;
+            match self.stream.read(buffer).map_err(normalize_timeout) {
+                Ok(read) => {
+                    if read != 0 {
+                        self.note_activity()?;
+                    }
+                    return Ok(read);
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
+                {
+                    self.remaining()?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
 impl Write for DeadlineTcpStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.write(buffer).map_err(normalize_timeout)
+        loop {
+            self.stream.set_write_timeout(Some(self.remaining()?))?;
+            match self.stream.write(buffer).map_err(normalize_timeout) {
+                Ok(written) => {
+                    if written != 0 {
+                        self.note_activity()?;
+                    }
+                    return Ok(written);
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
+                {
+                    self.remaining()?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -1070,6 +2057,8 @@ mod tests {
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tungstenite::http::StatusCode;
+    use tungstenite::protocol::frame::Frame;
+    use tungstenite::protocol::frame::coding::{Data, OpCode};
 
     fn store() -> (std::path::PathBuf, EvidenceStore) {
         let nonce = SystemTime::now()
@@ -1720,5 +2709,322 @@ mod tests {
             format!("{}{}", certificate_pem, signing_key.serialize_pem()),
         );
         assert!(build_tls_config(&plan, &options).is_ok());
+    }
+
+    #[test]
+    fn executes_ordered_messages_control_frames_and_client_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.actions = vec![
+            WebSocketAction::SendText {
+                text: "hello".into(),
+            },
+            WebSocketAction::ExpectText {
+                equals: "world".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::SendBinary {
+                payload_base64: "AAE=".into(),
+            },
+            WebSocketAction::ExpectBinary {
+                payload_base64: "AgM=".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::Ping {
+                payload_base64: "cGk=".into(),
+            },
+            WebSocketAction::ExpectPong {
+                payload_base64: "cGk=".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::Close {
+                code: 1000,
+                reason: "done".into(),
+            },
+        ];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            assert_eq!(socket.read().unwrap(), Message::Text("hello".into()));
+            socket.send(Message::Text("world".into())).unwrap();
+            assert_eq!(
+                socket.read().unwrap(),
+                Message::Binary(vec![0_u8, 1].into())
+            );
+            socket.send(Message::Binary(vec![2_u8, 3].into())).unwrap();
+            assert_eq!(socket.read().unwrap(), Message::Ping(b"pi".to_vec().into()));
+            socket.flush().unwrap();
+            assert!(matches!(socket.read().unwrap(), Message::Close(Some(_))));
+            let _ = socket.flush();
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("execution must return an observation")
+        };
+        assert_eq!(observation.exit, 0);
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::Completed
+        );
+        assert_eq!(observation.counters.inbound_frames, 4);
+        assert_eq!(observation.counters.outbound_frames, 4);
+        assert_eq!(observation.counters.inbound_messages, 2);
+        assert_eq!(observation.counters.outbound_messages, 2);
+        assert_eq!(
+            observation.close,
+            Some(WebSocketCloseObservation {
+                initiator: WebSocketCloseInitiator::Client,
+                code: 1000,
+                reason: "done".into(),
+            })
+        );
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fragmented_message_and_interleaved_ping_are_reassembled_and_counted() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "hello".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: Some("finished".into()),
+                timeout_ms: None,
+            },
+        ];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            socket
+                .write(Message::Frame(Frame::message(
+                    b"hel".to_vec(),
+                    OpCode::Data(Data::Text),
+                    false,
+                )))
+                .unwrap();
+            socket.write(Message::Ping(b"x".to_vec().into())).unwrap();
+            socket
+                .write(Message::Frame(Frame::message(
+                    b"lo".to_vec(),
+                    OpCode::Data(Data::Continue),
+                    true,
+                )))
+                .unwrap();
+            socket
+                .write(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "finished".into(),
+                })))
+                .unwrap();
+            socket.flush().unwrap();
+            assert_eq!(socket.read().unwrap(), Message::Pong(b"x".to_vec().into()));
+            assert!(matches!(socket.read().unwrap(), Message::Close(Some(_))));
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("execution must return an observation")
+        };
+        assert_eq!(observation.exit, 0);
+        assert_eq!(observation.counters.inbound_frames, 4);
+        assert_eq!(observation.counters.inbound_messages, 1);
+        assert_eq!(observation.counters.outbound_frames, 2);
+        assert_eq!(observation.counters.outbound_messages, 0);
+        assert_eq!(observation.counters.inbound_bytes, 16);
+        assert_eq!(observation.counters.outbound_bytes, 11);
+        assert_eq!(observation.close.unwrap().reason, "finished");
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unexpected_data_and_fragment_budget_exhaustion_fail_without_scanning() {
+        let mismatch_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut mismatch_plan = ws_plan(&mismatch_listener);
+        mismatch_plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "expected".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: None,
+            },
+        ];
+        let mismatch_plan = mismatch_plan.seal().unwrap();
+        let mismatch_server = thread::spawn(move || {
+            let mut socket =
+                tungstenite::accept(accept_test_connection(&mismatch_listener)).unwrap();
+            socket.send(Message::Binary(vec![7_u8].into())).unwrap();
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&mismatch_plan, &options(&mismatch_plan), &store).unwrap()
+        else {
+            panic!("mismatch must return an observation")
+        };
+        assert_eq!(observation.exit, 1);
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::ExpectationFailed
+        );
+        assert_eq!(observation.counters.inbound_messages, 1);
+        mismatch_server.join().unwrap();
+
+        let budget_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut budget_plan = ws_plan(&budget_listener);
+        budget_plan.limits.max_inbound_frames = 1;
+        budget_plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "hello".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: None,
+            },
+        ];
+        let budget_plan = budget_plan.seal().unwrap();
+        let budget_server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&budget_listener)).unwrap();
+            socket
+                .write(Message::Frame(Frame::message(
+                    b"hel".to_vec(),
+                    OpCode::Data(Data::Text),
+                    false,
+                )))
+                .unwrap();
+            let _ = socket.send(Message::Frame(Frame::message(
+                b"lo".to_vec(),
+                OpCode::Data(Data::Continue),
+                true,
+            )));
+        });
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&budget_plan, &options(&budget_plan), &store).unwrap()
+        else {
+            panic!("budget failure must return an observation")
+        };
+        assert_eq!(observation.exit, 1);
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::BudgetExhausted
+        );
+        assert_eq!(observation.counters.inbound_frames, 1);
+        budget_server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn json_expectations_and_deadline_precedence_are_deterministic() {
+        let action = WebSocketAction::ExpectJson {
+            pointer: Some("/payload".into()),
+            equals: Some(json!({"id": 7})),
+            schema: Some(json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "integer", "minimum": 1}},
+                "additionalProperties": false
+            })),
+            timeout_ms: None,
+        };
+        assert!(expectation_matches_text(&action, r#"{"payload":{"id":7}}"#));
+        assert!(!expectation_matches_text(
+            &action,
+            r#"{"payload":{"id":0}}"#
+        ));
+        assert!(!expectation_matches_text(&action, "not-json"));
+
+        let origin = Instant::now();
+        assert_eq!(
+            select_deadline(
+                origin + Duration::from_millis(30),
+                origin + Duration::from_millis(20),
+                origin + Duration::from_millis(10),
+                WebSocketTerminalCause::CloseTimeout,
+            )
+            .1,
+            WebSocketTerminalCause::IdleTimeout
+        );
+        assert_eq!(
+            select_deadline(
+                origin + Duration::from_millis(30),
+                origin + Duration::from_millis(10),
+                origin + Duration::from_millis(20),
+                WebSocketTerminalCause::CloseTimeout,
+            )
+            .1,
+            WebSocketTerminalCause::CloseTimeout
+        );
+        assert_eq!(
+            select_deadline(
+                origin + Duration::from_millis(10),
+                origin + Duration::from_millis(10),
+                origin + Duration::from_millis(10),
+                WebSocketTerminalCause::ActionTimeout,
+            )
+            .1,
+            WebSocketTerminalCause::TotalTimeout
+        );
+    }
+
+    #[test]
+    fn cancellation_interrupts_a_silent_session_and_emits_one_terminal_observation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.limits.action_timeout_ms = 1_000;
+        plan.limits.idle_timeout_ms = 1_000;
+        plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "never".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: None,
+            },
+        ];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let _socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            thread::sleep(Duration::from_millis(150));
+        });
+        let cancellation = WebSocketCancellation::default();
+        let trigger = cancellation.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            trigger.cancel();
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket_with_cancellation(&plan, &options(&plan), &store, &cancellation)
+                .unwrap()
+        else {
+            panic!("cancellation must return an observation")
+        };
+        assert_eq!(observation.exit, 3);
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::Cancelled
+        );
+        assert!(cancellation.is_cancelled());
+        canceller.join().unwrap();
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }
