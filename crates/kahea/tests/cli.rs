@@ -3,8 +3,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tungstenite::Message;
 
@@ -582,16 +582,18 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
         .iter()
         .map(|value| value.as_str().unwrap().to_owned())
         .collect();
+    let (timeout_done_tx, timeout_done_rx) = mpsc::channel();
     let timeout_server = thread::spawn(move || {
         let (stream, _) = timeout_listener.accept().unwrap();
         let _socket = tungstenite::accept(stream).unwrap();
-        thread::sleep(Duration::from_millis(150));
+        timeout_done_rx.recv().unwrap();
     });
     let output = invoke_websocket(
         timeout_plan["id"].as_str().unwrap(),
         &timeout_grants,
         &timeout_store,
     );
+    timeout_done_tx.send(()).unwrap();
     assert_eq!(output.status.code(), Some(3));
     let observation: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(observation["terminal_cause"], "action-timeout");
