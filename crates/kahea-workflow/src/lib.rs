@@ -421,6 +421,7 @@ pub fn invoke_workflow(
             max_response_bytes: options.max_response_bytes,
             expected_config_fingerprint: options.expected_config_fingerprint.clone(),
             expected_policy_fingerprint: options.expected_policy_fingerprint.clone(),
+            additional_root_certificates: options.additional_root_certificates.clone(),
         };
         let mut attempts = Vec::new();
         let mut retries = 0_u64;

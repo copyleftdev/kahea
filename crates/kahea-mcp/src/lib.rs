@@ -374,6 +374,7 @@ fn tool_invoke(arguments: &Value) -> Result<Value, McpError> {
                 .policy_fingerprint()
                 .map_err(operation_error)?,
         ),
+        additional_root_certificates: Vec::new(),
     };
     if stored_plan_kind(&store_root, plan_reference).as_deref() == Some("conformance-plan") {
         let plan = load_conformance_plan(&store_root, plan_reference).map_err(operation_error)?;

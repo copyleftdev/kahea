@@ -383,6 +383,23 @@ Issue `#9` may select a WebSocket dependency only after a small proof against `#
 If no blocking dependency passes those gates, the executor may use a private async implementation,
 but the ADR must be amended before adding an async runtime boundary.
 
+#### Selection record for #9
+
+The transport uses `tungstenite` 0.30 for the RFC 6455 frame codec and protocol state, with its
+redirecting/DNS convenience client disabled. Kāhea supplies a single already-resolved and
+policy-checked `TcpStream`, owns the HTTP/1.1 upgrade validation, and constructs Rustls 0.23 over
+that same stream for `wss`. This keeps DNS pinning, Host/SNI, deadlines, trust roots, mutual TLS,
+redirect denial, and evidence redaction inside the executor boundary.
+
+The dependency proof is executable in `kahea-exec` tests. It covers loopback IPv4 and IPv6,
+single-resolution address pinning with the original hostname preserved, RFC token handling,
+subprotocol selection, extension rejection, bad accept keys, redirects, silent-peer deadlines,
+controlled TLS roots, hostname validation, and secret/entropy-free evidence. Frame fragmentation,
+control-frame, UTF-8, close, and aggregate session-budget cases remain owned by #12 and the
+controlled oracle in #16. `tungstenite` is blocking, accepts caller-owned streams, configures frame
+and message limits before reads, creates no runtime or background thread, supports Rust versions
+older than the workspace's Rust 1.95 floor, and is MIT/Apache-2.0 licensed.
+
 ## Alternatives considered
 
 ### Add optional WebSocket fields to `RequestPlan`

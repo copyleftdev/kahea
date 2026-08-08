@@ -1,5 +1,11 @@
 //! Policy-gated execution of sealed request plans.
 
+mod websocket;
+
+pub use websocket::{
+    WebSocketConnectResult, WebSocketConnection, WebSocketHandshakeMetadata, connect_websocket,
+};
+
 use base64::Engine;
 use kahea_core::{
     DenialEnvelope, Observation, Outcome, PROTOCOL, RequestPlan, VERSION,
@@ -60,6 +66,7 @@ pub struct InvokeOptions {
     pub max_response_bytes: u64,
     pub expected_config_fingerprint: Option<String>,
     pub expected_policy_fingerprint: Option<String>,
+    pub additional_root_certificates: Vec<Vec<u8>>,
 }
 
 impl Default for InvokeOptions {
@@ -71,6 +78,7 @@ impl Default for InvokeOptions {
             max_response_bytes: 16 * 1024 * 1024,
             expected_config_fingerprint: None,
             expected_policy_fingerprint: None,
+            additional_root_certificates: Vec::new(),
         }
     }
 }

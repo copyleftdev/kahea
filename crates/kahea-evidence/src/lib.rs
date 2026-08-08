@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use kahea_core::{
-    EvidenceEnvelope, ExplanationEnvelope, Observation, PROTOCOL, VERSION,
+    EvidenceEnvelope, ExplanationEnvelope, Observation, PROTOCOL, VERSION, WebSocketObservation,
     default_config_fingerprint, digest, short_handle,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -233,6 +233,21 @@ impl EvidenceStore {
         observation: &Observation,
     ) -> Result<EvidenceEnvelope, EvidenceError> {
         let envelope = self.put_json("observation", observation, true)?;
+        let path = self
+            .root
+            .join("observations")
+            .join(format!("{}.json", envelope.handle.replace(':', "-")));
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec(observation)?)?;
+        fs::rename(temporary, path)?;
+        Ok(envelope)
+    }
+
+    pub fn persist_websocket_observation(
+        &self,
+        observation: &WebSocketObservation,
+    ) -> Result<EvidenceEnvelope, EvidenceError> {
+        let envelope = self.put_json("websocket-observation", observation, true)?;
         let path = self
             .root
             .join("observations")
