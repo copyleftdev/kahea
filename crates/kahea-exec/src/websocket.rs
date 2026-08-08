@@ -529,6 +529,7 @@ fn connect_websocket_resolving_cancellable(
                     handshake,
                     trace: Some(trace.handle),
                     http_version: version,
+                    counters: failure.counters,
                 },
             );
         }
@@ -1548,6 +1549,7 @@ fn perform_upgrade(
                 exit: 3,
                 status: None,
                 response: None,
+                counters: WebSocketCounters::default(),
             });
         }
         if received.len().saturating_add(bytes) > MAX_HANDSHAKE_BYTES + chunk.len() {
@@ -1640,13 +1642,40 @@ fn perform_upgrade(
             exit: 1,
             status: Some(status),
             response: Some(Box::new(response)),
+            counters: WebSocketCounters::default(),
         });
     }
     let buffered = received[header_end..].to_vec();
-    let mut stream = AccountedStream::new(stream, limits, accounting);
-    stream
-        .observe_buffered_inbound(&buffered)
-        .map_err(|error| io_handshake_failure(error, tls))?;
+    let mut stream = AccountedStream::new(stream, limits, Arc::clone(&accounting));
+    if stream.observe_buffered_inbound(&buffered).is_err() {
+        let (cause, counters) = accounting.lock().map_or(
+            (
+                WebSocketTerminalCause::IoFailure,
+                WebSocketCounters::default(),
+            ),
+            |accounting| {
+                (
+                    accounting
+                        .failure
+                        .unwrap_or(WebSocketTerminalCause::IoFailure),
+                    accounting.counters.clone(),
+                )
+            },
+        );
+        let (outcome, exit) = if cause == WebSocketTerminalCause::BudgetExhausted {
+            (Outcome::Failed, 1)
+        } else {
+            (Outcome::Error, 3)
+        };
+        return Err(HandshakeFailure {
+            outcome,
+            cause,
+            exit,
+            status: Some(status),
+            response: Some(Box::new(response)),
+            counters,
+        });
+    }
     let socket = WebSocket::from_partially_read(stream, buffered, Role::Client, Some(config));
     Ok((socket, response))
 }
@@ -1735,6 +1764,7 @@ struct HandshakeFailure {
     exit: u8,
     status: Option<u16>,
     response: Option<Box<Response>>,
+    counters: WebSocketCounters,
 }
 
 fn handshake_check_failure() -> HandshakeFailure {
@@ -1744,6 +1774,7 @@ fn handshake_check_failure() -> HandshakeFailure {
         exit: 1,
         status: None,
         response: None,
+        counters: WebSocketCounters::default(),
     }
 }
 
@@ -1768,6 +1799,7 @@ fn io_handshake_failure(error: io::Error, tls: bool) -> HandshakeFailure {
         exit: 3,
         status: None,
         response: None,
+        counters: WebSocketCounters::default(),
     }
 }
 
@@ -1779,6 +1811,7 @@ struct FailureDetails {
     handshake: Option<String>,
     trace: Option<String>,
     http_version: Option<String>,
+    counters: WebSocketCounters,
 }
 
 fn failed_observation(
@@ -1810,7 +1843,7 @@ fn failed_observation(
         trace: details.trace,
         close: None,
         terminal_cause: cause,
-        counters: WebSocketCounters::default(),
+        counters: details.counters,
         resolved_origin: details.resolved.map(|address| address.to_string()),
         http_version: details.http_version,
         secret_refs: plan.secret_refs.clone(),
@@ -2899,29 +2932,29 @@ mod tests {
         let budget_plan = budget_plan.seal().unwrap();
         let budget_server = thread::spawn(move || {
             let mut socket = tungstenite::accept(accept_test_connection(&budget_listener)).unwrap();
-            socket
-                .write(Message::Frame(Frame::message(
-                    b"hel".to_vec(),
-                    OpCode::Data(Data::Text),
-                    false,
-                )))
+            let mut wire = Vec::new();
+            Frame::message(b"hel".to_vec(), OpCode::Data(Data::Text), false)
+                .format(&mut wire)
                 .unwrap();
-            let _ = socket.send(Message::Frame(Frame::message(
-                b"lo".to_vec(),
-                OpCode::Data(Data::Continue),
-                true,
-            )));
+            Frame::message(b"lo".to_vec(), OpCode::Data(Data::Continue), true)
+                .format(&mut wire)
+                .unwrap();
+            socket.get_mut().write_all(&wire).unwrap();
+            socket.get_mut().flush().unwrap();
+            // Keep the peer alive long enough for kernels that discard unread data on an
+            // immediate close to deliver both deliberately over-budget frames.
+            thread::sleep(Duration::from_millis(100));
         });
         let WebSocketConnectResult::Observation(observation) =
             execute_websocket(&budget_plan, &options(&budget_plan), &store).unwrap()
         else {
             panic!("budget failure must return an observation")
         };
-        assert_eq!(observation.exit, 1);
         assert_eq!(
             observation.terminal_cause,
             WebSocketTerminalCause::BudgetExhausted
         );
+        assert_eq!(observation.exit, 1);
         assert_eq!(observation.counters.inbound_frames, 1);
         budget_server.join().unwrap();
         drop(store);
