@@ -2096,6 +2096,7 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
     use std::fs;
     use std::net::{Ipv6Addr, TcpListener};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tungstenite::http::StatusCode;
@@ -3128,13 +3129,16 @@ mod tests {
             },
         ];
         let plan = plan.seal().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let server = thread::spawn(move || {
             let _socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            ready_tx.send(()).unwrap();
             thread::sleep(Duration::from_millis(150));
         });
         let cancellation = WebSocketCancellation::default();
         let trigger = cancellation.clone();
         let canceller = thread::spawn(move || {
+            ready_rx.recv().unwrap();
             thread::sleep(Duration::from_millis(40));
             trigger.cancel();
         });
