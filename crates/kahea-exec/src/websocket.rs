@@ -12,7 +12,7 @@ use sha1::{Digest, Sha1};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tungstenite::WebSocket;
 use tungstenite::client::IntoClientRequest;
@@ -514,14 +514,22 @@ fn build_tls_config(
     plan: &WebSocketPlan,
     options: &InvokeOptions,
 ) -> Result<Arc<ClientConfig>, ExecError> {
-    let mut roots = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        return Err(ExecError::Transport(
-            "native TLS trust store could not be loaded completely".into(),
-        ));
-    }
-    roots.add_parsable_certificates(native.certs);
+    static NATIVE_ROOTS: OnceLock<Result<RootCertStore, ()>> = OnceLock::new();
+    let mut roots = NATIVE_ROOTS
+        .get_or_init(|| {
+            let native = rustls_native_certs::load_native_certs();
+            if !native.errors.is_empty() {
+                return Err(());
+            }
+            let mut roots = RootCertStore::empty();
+            roots.add_parsable_certificates(native.certs);
+            Ok(roots)
+        })
+        .as_ref()
+        .map_err(|()| {
+            ExecError::Transport("native TLS trust store could not be loaded completely".into())
+        })?
+        .clone();
     for pem in &options.additional_root_certificates_pem {
         let certificates: Vec<_> = CertificateDer::pem_slice_iter(pem)
             .collect::<Result<_, _>>()
@@ -1157,6 +1165,29 @@ mod tests {
         }
     }
 
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        const TEST_IO_TIMEOUT: Duration = Duration::from_secs(5);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + TEST_IO_TIMEOUT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+                    stream.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+                    return stream;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test WebSocket peer did not connect within five seconds"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("test WebSocket accept failed: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn redaction_marker_as_a_secret_terminates_without_revealing_it() {
         assert_eq!(
@@ -1298,7 +1329,7 @@ mod tests {
         let plan = plan.seal().unwrap();
         let expected_host = format!("socket.example.test:{}", address.port());
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_test_connection(&listener);
             tungstenite::accept_hdr(
                 stream,
                 move |request: &Request<()>, response: tungstenite::http::Response<()>| {
@@ -1371,7 +1402,7 @@ mod tests {
             .push("subprotocol:kahea.test.v1".into());
         let plan = plan.seal().unwrap();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_test_connection(&listener);
             tungstenite::accept_hdr(
                 stream,
                 |request: &Request<()>, mut response: tungstenite::http::Response<()>| {
@@ -1433,7 +1464,7 @@ mod tests {
         let redirect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let redirect_plan = ws_plan(&redirect_listener);
         let redirect_server = thread::spawn(move || {
-            let (mut stream, _) = redirect_listener.accept().unwrap();
+            let mut stream = accept_test_connection(&redirect_listener);
             let mut request = [0_u8; 2048];
             let _ = stream.read(&mut request).unwrap();
             stream
@@ -1455,7 +1486,7 @@ mod tests {
         let extension_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let extension_plan = ws_plan(&extension_listener);
         let extension_server = thread::spawn(move || {
-            let (stream, _) = extension_listener.accept().unwrap();
+            let stream = accept_test_connection(&extension_listener);
             tungstenite::accept_hdr(
                 stream,
                 |_request: &Request<()>, mut response: tungstenite::http::Response<()>| {
@@ -1487,7 +1518,7 @@ mod tests {
         let malformed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let malformed_plan = ws_plan(&malformed_listener);
         let malformed_server = thread::spawn(move || {
-            let (mut stream, _) = malformed_listener.accept().unwrap();
+            let mut stream = accept_test_connection(&malformed_listener);
             let mut request = [0_u8; 2048];
             let _ = stream.read(&mut request).unwrap();
             stream
@@ -1512,7 +1543,7 @@ mod tests {
         silent_plan.limits.connect_timeout_ms = 30;
         silent_plan = silent_plan.seal().unwrap();
         let silent_server = thread::spawn(move || {
-            let (_stream, _) = silent_listener.accept().unwrap();
+            let _stream = accept_test_connection(&silent_listener);
             thread::sleep(Duration::from_millis(80));
         });
         let WebSocketConnectResult::Observation(observation) =
@@ -1538,7 +1569,7 @@ mod tests {
         };
         let plan = ws_plan(&listener);
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_test_connection(&listener);
             tungstenite::accept(stream).unwrap()
         });
         let (root, store) = store();
@@ -1571,7 +1602,7 @@ mod tests {
             .with_single_cert(vec![certificate_der], key)
             .unwrap();
         let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_test_connection(&listener);
             let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
             let stream = StreamOwned::new(connection, stream);
             tungstenite::accept(stream).unwrap()
@@ -1606,7 +1637,7 @@ mod tests {
             .with_single_cert(vec![certificate_der], key)
             .unwrap();
         let mismatch_server = thread::spawn(move || {
-            let (stream, _) = mismatch_listener.accept().unwrap();
+            let stream = accept_test_connection(&mismatch_listener);
             let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
             let stream = StreamOwned::new(connection, stream);
             assert!(tungstenite::accept(stream).is_err());
