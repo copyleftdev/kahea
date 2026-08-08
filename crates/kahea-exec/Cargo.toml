@@ -11,12 +11,21 @@ publish.workspace = true
 
 [dependencies]
 base64.workspace = true
+httparse.workspace = true
 kahea-core = { path = "../kahea-core" }
 kahea-evidence = { path = "../kahea-evidence" }
 reqwest.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pki-types.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 serde_json_path.workspace = true
 sxd-document.workspace = true
 sxd-xpath.workspace = true
 thiserror.workspace = true
+tungstenite.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+rcgen = { version = "0.14.8", default-features = false, features = ["aws_lc_rs", "pem"] }

@@ -35,10 +35,16 @@ toml = "1.1.4"
 percent-encoding = "2.3.2"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "http2", "gzip", "brotli", "deflate"] }
+httparse = "1.10.1"
+rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
 serde_json_path = { version = "0.7.2", default-features = false }
+sha1 = "0.11.0"
 shell-words = "1.1.1"
 sxd-document = "0.3.2"
 sxd-xpath = "0.4.2"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "__rustls-tls"] }
 url = "2.5.7"
 yaml-rust2 = { version = "0.11.0", default-features = false }
 zstd = "0.13.3"
