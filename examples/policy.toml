@@ -4,3 +4,22 @@ max_request_bytes = 16777216
 require_production_write_approval = true
 sensitive_headers = ["X-Customer-Token"]
 redact_response_json_pointers = ["/customer/email", "/payment/card"]
+
+[websocket]
+allowed_origins = ["https://client.example.test"]
+allowed_subprotocols = ["kahea.events.v1"]
+
+[websocket.max_limits]
+connect_timeout_ms = 30000
+action_timeout_ms = 30000
+idle_timeout_ms = 30000
+close_timeout_ms = 10000
+total_timeout_ms = 120000
+max_frame_bytes = 4194304
+max_message_bytes = 16777216
+max_inbound_frames = 4096
+max_outbound_frames = 4096
+max_inbound_messages = 2048
+max_outbound_messages = 2048
+max_inbound_bytes = 67108864
+max_outbound_bytes = 67108864

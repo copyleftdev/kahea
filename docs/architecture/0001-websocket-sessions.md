@@ -54,14 +54,16 @@ The first implementation accepts a local JSON or YAML `websocket-session` source
 a later ingestion adapter into the same plan type, not another executor. Planning never performs
 DNS, TLS, authentication, or network access.
 
-The contract fixture at
-[`fixtures/websocket/session.json`](../../fixtures/websocket/session.json) shows the source
-spelling. Its relevant fields are:
+The equivalent contract fixtures at
+[`fixtures/websocket/session.json`](../../fixtures/websocket/session.json) and
+[`fixtures/websocket/session.yaml`](../../fixtures/websocket/session.yaml) show the accepted source
+spellings. Their relevant fields are:
 
 - `operationId`: the addressable operation name used by inspect and plan.
 - `url`: a `ws` or `wss` target without userinfo or fragment.
-- `risk`: optional declared risk. An absent WebSocket risk is `unknown`; policy may override it.
-  The planner never infers `read` merely because a session has no data-send action.
+- `risk`: optional declared risk. A data-send action raises an absent, `unknown`, or `read` source
+  declaration to `write`; a configuration risk override is authoritative. A receive-only session
+  with no declaration remains `unknown` rather than being inferred as `read`.
 - `headers`: non-secret handshake headers. Protocol-owned headers cannot be supplied here.
 - `auth`: an auth-profile reference, never secret material.
 - `origin` and `subprotocols`: ordered handshake intent.
@@ -169,8 +171,40 @@ The exact required capabilities are:
 - existing `secret:*`, `tls-client-cert:*`, and approval grants when applicable
 
 Protocol data sends do not create an override grant: their side-effect boundary is expressed by the
-sealed actions and plan risk. A session with absent risk is `unknown`; data sends default to at least
-`write` if policy permits inference, and `destructive` is only explicit or policy-configured.
+sealed actions and plan risk. A receive-only session with absent risk is `unknown`; data sends
+default to at least `write`, and `destructive` is only explicit or policy-configured.
+
+### Policy configuration
+
+WebSocket planning reuses the existing host, sensitive-header, redaction, production-write, auth,
+and risk policy. The optional WebSocket-specific policy is nested under `websocket` in a standalone
+policy TOML file:
+
+```toml
+[websocket]
+allowed_origins = ["https://client.example.test"]
+allowed_subprotocols = ["kahea.events.v1"]
+
+[websocket.max_limits]
+connect_timeout_ms = 30000
+action_timeout_ms = 30000
+idle_timeout_ms = 30000
+close_timeout_ms = 10000
+total_timeout_ms = 120000
+max_frame_bytes = 4194304
+max_message_bytes = 16777216
+max_inbound_frames = 4096
+max_outbound_frames = 4096
+max_inbound_messages = 2048
+max_outbound_messages = 2048
+max_inbound_bytes = 67108864
+max_outbound_bytes = 67108864
+```
+
+Empty origin or subprotocol lists allow any otherwise valid value. Every maximum is finite and
+positive; requested limits are materialized after being tightened to these maxima. Contradictory
+timeout or frame/message maxima fail closed. The WebSocket policy has a separate fingerprint so
+its settings affect WebSocket seals without changing existing HTTP plan bytes.
 
 ### Canonicalization and sealing
 
