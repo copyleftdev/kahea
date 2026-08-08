@@ -522,7 +522,7 @@ fn build_tls_config(
         ));
     }
     roots.add_parsable_certificates(native.certs);
-    for pem in &options.additional_root_certificates {
+    for pem in &options.additional_root_certificates_pem {
         let certificates: Vec<_> = CertificateDer::pem_slice_iter(pem)
             .collect::<Result<_, _>>()
             .map_err(|_| ExecError::Transport("TLS root certificate could not be loaded".into()))?;
@@ -1583,7 +1583,7 @@ mod tests {
         let (root, store) = store();
         let mut tls_options = options(&tls_plan);
         tls_options
-            .additional_root_certificates
+            .additional_root_certificates_pem
             .push(certificate_pem);
         let WebSocketConnectResult::Connected(connection) =
             connect_websocket(&tls_plan, &tls_options, &store).unwrap()
@@ -1617,7 +1617,7 @@ mod tests {
         );
         let mut mismatch_options = options(&mismatch_plan);
         mismatch_options
-            .additional_root_certificates
+            .additional_root_certificates_pem
             .push(certificate_pem);
         let WebSocketConnectResult::Observation(observation) =
             connect_websocket(&mismatch_plan, &mismatch_options, &store).unwrap()
@@ -1659,7 +1659,7 @@ mod tests {
         let certificate_pem = cert.pem();
         let mut missing_options = options(&plan);
         missing_options
-            .additional_root_certificates
+            .additional_root_certificates_pem
             .push(certificate_pem.as_bytes().to_vec());
         assert!(matches!(
             build_tls_config(&plan, &missing_options),
