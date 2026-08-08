@@ -90,6 +90,58 @@ fn invoke_websocket(plan: &str, grants: &[String], store: &Path) -> std::process
     Command::new(binary()).args(arguments).output().unwrap()
 }
 
+fn mcp_exchange(requests: &[Value]) -> Vec<Value> {
+    let mut child = Command::new(binary())
+        .args(["mcp", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = child.stdin.take().unwrap();
+        for request in requests {
+            writeln!(input, "{request}").unwrap();
+        }
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn mcp_call(id: u64, name: &str, arguments: Value) -> Value {
+    mcp_exchange(&[json!({
+        "jsonrpc":"2.0",
+        "id":id,
+        "method":"tools/call",
+        "params":{"name":name,"arguments":arguments}
+    })])
+    .pop()
+    .unwrap()
+}
+
+fn normalized_websocket_observation(mut value: Value) -> Value {
+    let object = value.as_object_mut().unwrap();
+    for key in [
+        "handshake_latency_ms",
+        "session_duration_ms",
+        "transcript",
+        "handshake",
+        "trace",
+    ] {
+        object.remove(key);
+    }
+    value
+}
+
 #[test]
 fn text_sources_can_be_inspected_from_standard_input_as_ndjson() {
     let spec = std::fs::read(fixture("billing.openapi.yaml")).unwrap();
@@ -167,6 +219,112 @@ fn cli_and_mcp_plans_are_semantically_identical() {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"]["structuredContent"], cli);
     std::fs::remove_dir_all(store).unwrap();
+}
+
+#[test]
+fn websocket_mcp_lists_strict_tools_resources_and_matches_cli_planning() {
+    let metadata = mcp_exchange(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}}),
+        json!({
+            "jsonrpc":"2.0",
+            "id":3,
+            "method":"resources/read",
+            "params":{"uri":"kahea://schema/websocket-session"}
+        }),
+    ]);
+    let tools = metadata[0]["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 4);
+    assert!(tools.iter().all(|tool| {
+        tool["inputSchema"]["additionalProperties"] == false
+            && tool["outputSchema"]["type"] == "object"
+    }));
+    let plan_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "kahea_plan")
+        .unwrap();
+    assert!(
+        plan_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("WebSocket")
+    );
+    let plan_schemas = plan_tool["outputSchema"]["oneOf"].as_array().unwrap();
+    assert_eq!(plan_schemas.len(), 4);
+    assert!(
+        plan_schemas
+            .iter()
+            .any(|schema| schema["properties"]["actions"].is_object())
+    );
+    let resource_uris: Vec<_> = metadata[1]["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap())
+        .collect();
+    assert!(resource_uris.contains(&"kahea://schema/websocket-session"));
+    assert!(resource_uris.contains(&"kahea://schema/websocket-plan"));
+    assert!(resource_uris.contains(&"kahea://schema/websocket-observation"));
+    let schema: Value = serde_json::from_str(
+        metadata[2]["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(schema["properties"]["limits"].is_object());
+    assert!(schema["properties"]["actions"].is_object());
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = scratch("websocket-mcp-plan");
+    let store = root.join("state");
+    let source = write_websocket_source(
+        &root,
+        &websocket_source(
+            listener.local_addr().unwrap().port(),
+            json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
+            500,
+        ),
+    );
+    let cli_index = output_json(&["inspect", source.to_str().unwrap()]);
+    let mcp_index = mcp_call(
+        4,
+        "kahea_inspect",
+        json!({"source":source,"limit":50,"cursor":0}),
+    );
+    assert_eq!(mcp_index["result"]["structuredContent"], cli_index);
+    assert_eq!(mcp_index["result"]["isError"], false);
+
+    let cli_plan = plan_websocket(&source, &store);
+    let mcp_plan = mcp_call(
+        5,
+        "kahea_plan",
+        json!({"source":source,"operation":"cliSession","store":store}),
+    );
+    assert_eq!(mcp_plan["result"]["structuredContent"], cli_plan);
+    let fallback: Value =
+        serde_json::from_str(mcp_plan["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(fallback, cli_plan);
+
+    let override_attempt = mcp_call(
+        6,
+        "kahea_plan",
+        json!({
+            "source":source,
+            "operation":"cliSession",
+            "server":"ws://attacker.example.test/socket",
+            "store":store
+        }),
+    );
+    assert_eq!(override_attempt["result"]["isError"], true);
+    assert!(
+        override_attempt["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("WebSocket sessions seal target")
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -523,6 +681,106 @@ fn websocket_cli_runs_the_sealed_session_and_explains_bounded_evidence() {
 }
 
 #[test]
+fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = scratch("websocket-mcp-success");
+    let store = root.join("state");
+    let source = write_websocket_source(
+        &root,
+        &websocket_source(
+            listener.local_addr().unwrap().port(),
+            json!([
+                {"type":"send-text","text":"hello"},
+                {"type":"expect-text","equals":"world","timeout_ms":null},
+                {"type":"close","code":1000,"reason":"done"}
+            ]),
+            500,
+        ),
+    );
+    let planned = mcp_call(
+        1,
+        "kahea_plan",
+        json!({"source":source,"operation":"cliSession","store":store}),
+    );
+    let plan = &planned["result"]["structuredContent"];
+    assert_eq!(plan["kind"], "websocket-plan");
+    let grants: Vec<String> = plan["required_grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|grant| grant.as_str().unwrap().to_owned())
+        .collect();
+    let denied_grants: Vec<String> = grants
+        .iter()
+        .filter(|grant| grant.as_str() != "websocket:connect")
+        .cloned()
+        .collect();
+    let cli_denied = invoke_websocket(plan["id"].as_str().unwrap(), &denied_grants, &store);
+    assert_eq!(cli_denied.status.code(), Some(4));
+    let cli_denied: Value = serde_json::from_slice(&cli_denied.stdout).unwrap();
+    let mcp_denied = mcp_call(
+        2,
+        "kahea_invoke",
+        json!({"plan":plan["id"],"grants":denied_grants,"store":store}),
+    );
+    assert_eq!(mcp_denied["result"]["structuredContent"], cli_denied);
+    assert_eq!(mcp_denied["result"]["structuredContent"]["exit"], 4);
+    assert_eq!(mcp_denied["result"]["isError"], false);
+
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            assert_eq!(socket.read().unwrap(), Message::Text("hello".into()));
+            socket.send(Message::Text("world".into())).unwrap();
+            assert!(matches!(socket.read().unwrap(), Message::Close(Some(_))));
+            let _ = socket.flush();
+        }
+    });
+    let cli_output = invoke_websocket(plan["id"].as_str().unwrap(), &grants, &store);
+    assert_eq!(cli_output.status.code(), Some(0));
+    let cli_observation: Value = serde_json::from_slice(&cli_output.stdout).unwrap();
+    let mcp_output = mcp_call(
+        3,
+        "kahea_invoke",
+        json!({"plan":plan["id"],"grants":grants,"store":store}),
+    );
+    assert_eq!(mcp_output["result"]["isError"], false);
+    let mcp_observation = mcp_output["result"]["structuredContent"].clone();
+    assert_eq!(mcp_observation["kind"], "websocket-observation");
+    assert_eq!(mcp_observation["terminal_cause"], "completed");
+    assert!(mcp_observation.get("entries").is_none());
+    assert_eq!(
+        normalized_websocket_observation(mcp_observation.clone()),
+        normalized_websocket_observation(cli_observation)
+    );
+    let fallback: Value =
+        serde_json::from_str(mcp_output["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(fallback, mcp_observation);
+    server.join().unwrap();
+
+    let explanation = mcp_call(
+        4,
+        "kahea_explain",
+        json!({
+            "handle":mcp_observation["transcript"],
+            "select":"/entries/1/check",
+            "store":store
+        }),
+    );
+    assert_eq!(explanation["result"]["isError"], false);
+    assert_eq!(
+        explanation["result"]["structuredContent"]["value"],
+        "matched"
+    );
+    assert_eq!(
+        explanation["result"]["structuredContent"]["selector"],
+        "/entries/1/check"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
     let expectation_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let expectation_root = scratch("websocket-expectation");
@@ -636,6 +894,109 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
     assert_eq!(observation["terminal_cause"], "handshake-check-failed");
     handshake_server.join().unwrap();
     std::fs::remove_dir_all(handshake_root).unwrap();
+}
+
+#[test]
+fn websocket_mcp_maps_failed_expectations_and_timeouts() {
+    let expectation_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let expectation_root = scratch("websocket-mcp-expectation");
+    let expectation_store = expectation_root.join("state");
+    let expectation_source = write_websocket_source(
+        &expectation_root,
+        &websocket_source(
+            expectation_listener.local_addr().unwrap().port(),
+            json!([
+                {"type":"expect-text","equals":"expected","timeout_ms":null},
+                {"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}
+            ]),
+            500,
+        ),
+    );
+    let expectation_plan = mcp_call(
+        1,
+        "kahea_plan",
+        json!({
+            "source":expectation_source,
+            "operation":"cliSession",
+            "store":expectation_store
+        }),
+    )["result"]["structuredContent"]
+        .clone();
+    let expectation_grants: Vec<String> = expectation_plan["required_grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|grant| grant.as_str().unwrap().to_owned())
+        .collect();
+    let expectation_server = thread::spawn(move || {
+        let (stream, _) = expectation_listener.accept().unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        socket.send(Message::Text("unexpected".into())).unwrap();
+    });
+    let failed = mcp_call(
+        2,
+        "kahea_invoke",
+        json!({
+            "plan":expectation_plan["id"],
+            "grants":expectation_grants,
+            "store":expectation_store
+        }),
+    );
+    assert_eq!(failed["result"]["structuredContent"]["exit"], 1);
+    assert_eq!(
+        failed["result"]["structuredContent"]["terminal_cause"],
+        "expectation-failed"
+    );
+    assert_eq!(failed["result"]["isError"], false);
+    expectation_server.join().unwrap();
+    std::fs::remove_dir_all(expectation_root).unwrap();
+
+    let timeout_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let timeout_root = scratch("websocket-mcp-timeout");
+    let timeout_store = timeout_root.join("state");
+    let timeout_source = write_websocket_source(
+        &timeout_root,
+        &websocket_source(
+            timeout_listener.local_addr().unwrap().port(),
+            json!([
+                {"type":"expect-text","equals":"never","timeout_ms":40},
+                {"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}
+            ]),
+            40,
+        ),
+    );
+    let timeout_plan = mcp_call(
+        3,
+        "kahea_plan",
+        json!({"source":timeout_source,"operation":"cliSession","store":timeout_store}),
+    )["result"]["structuredContent"]
+        .clone();
+    let timeout_grants: Vec<String> = timeout_plan["required_grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|grant| grant.as_str().unwrap().to_owned())
+        .collect();
+    let (timeout_done_tx, timeout_done_rx) = mpsc::channel();
+    let timeout_server = thread::spawn(move || {
+        let (stream, _) = timeout_listener.accept().unwrap();
+        let _socket = tungstenite::accept(stream).unwrap();
+        timeout_done_rx.recv().unwrap();
+    });
+    let timed_out = mcp_call(
+        4,
+        "kahea_invoke",
+        json!({"plan":timeout_plan["id"],"grants":timeout_grants,"store":timeout_store}),
+    );
+    timeout_done_tx.send(()).unwrap();
+    assert_eq!(timed_out["result"]["structuredContent"]["exit"], 3);
+    assert_eq!(
+        timed_out["result"]["structuredContent"]["terminal_cause"],
+        "action-timeout"
+    );
+    assert_eq!(timed_out["result"]["isError"], true);
+    timeout_server.join().unwrap();
+    std::fs::remove_dir_all(timeout_root).unwrap();
 }
 
 #[test]

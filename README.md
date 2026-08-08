@@ -15,7 +15,7 @@ Kāhea is a local-first, deterministic API invocation kernel for coding agents.
 
 > Intent may be probabilistic. The call must be exact.
 
-It turns OpenAPI descriptions, request captures, and Arazzo workflows into integrity-sealed request plans. Invocation is a separate operation guarded by exact capability grants; responses become typed observations and content-addressed evidence.
+It turns OpenAPI descriptions, request captures, Arazzo workflows, and finite WebSocket sessions into integrity-sealed plans. Invocation is a separate operation guarded by exact capability grants; responses and inbound frames become typed observations and content-addressed evidence.
 
 ## Install Kāhea
 
@@ -301,7 +301,16 @@ Exports recursively include referenced evidence in a self-contained JSON bundle.
 kahea mcp serve --stdio
 ```
 
-The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. Pass a `conformance` options object to `kahea_plan` to create a campaign; `kahea_invoke` executes its sealed handle. It projects the same Rust library calls as the CLI; request-plan and conformance-plan parity are integration-tested. Fixed resources expose `describe` and public schemas, while templates expose sealed plans and untrusted evidence from the default `.kahea` store. See the current [MCP schema](https://modelcontextprotocol.io/specification/2025-11-25/schema) and [stdio transport requirements](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. The same tools accept direct finite `websocket-session` JSON/YAML sources; `kahea_plan` seals their target, auth reference, ordered actions, checks, and limits without HTTP-style overrides. `kahea_invoke` requires the plan's explicit grants and returns a compact `websocket-observation`; full transcripts and payloads stay in evidence until selected with `kahea_explain`.
+
+```json
+{"tool":"kahea_inspect","arguments":{"source":"fixtures/websocket/session.json"}}
+{"tool":"kahea_plan","arguments":{"source":"fixtures/websocket/session.json","operation":"subscribeBuildEvents"}}
+{"tool":"kahea_invoke","arguments":{"plan":"plan:HANDLE","grants":["net:socket.example.test:443","websocket:connect"]}}
+{"tool":"kahea_explain","arguments":{"handle":"transcript:HANDLE","select":"/entries/0"}}
+```
+
+Pass a `conformance` options object to `kahea_plan` to create an HTTP campaign; `kahea_invoke` executes its sealed handle. All tools publish strict input and output schemas. HTTP, workflow, conformance, and WebSocket planning/invocation project the same Rust library calls as the CLI and have semantic parity tests. Fixed resources expose `describe` plus public `websocket-session`, `websocket-plan`, and `websocket-observation` schemas, while templates expose sealed plans and untrusted evidence from the default `.kahea` store. See the current [MCP schema](https://modelcontextprotocol.io/specification/2025-11-25/schema) and [stdio transport requirements](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
 
 The agent-use contract is packaged in
 [`plugins/kahea/skills/kahea/SKILL.md`](plugins/kahea/skills/kahea/SKILL.md):
