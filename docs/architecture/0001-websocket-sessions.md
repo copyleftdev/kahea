@@ -391,6 +391,12 @@ policy-checked `TcpStream`, owns the HTTP/1.1 upgrade validation, and constructs
 that same stream for `wss`. This keeps DNS pinning, Host/SNI, deadlines, trust roots, mutual TLS,
 redirect denial, and evidence redaction inside the executor boundary.
 
+The workspace enables tungstenite's public `rustls-tls-native-roots` feature only to expose its
+Rustls stream adapter; Kāhea still builds and supplies the TLS configuration itself. The private
+`__rustls-tls` feature is deliberately avoided. The exact tungstenite release is lockfile-pinned,
+compiled on every supported CI platform, and included in the advisory and dependency-policy gates;
+upgrades must rerun those gates.
+
 The dependency proof is executable in `kahea-exec` tests. It covers loopback IPv4 and IPv6,
 single-resolution address pinning with the original hostname preserved, RFC token handling,
 subprotocol selection, extension rejection, bad accept keys, redirects, silent-peer deadlines,

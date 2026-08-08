@@ -6,6 +6,7 @@ use kahea_core::{
     default_config_fingerprint, digest, short_handle,
 };
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use serde_json::{Value, json};
 use serde_json_path::JsonPath;
 use std::collections::{BTreeMap, BTreeSet};
@@ -232,22 +233,22 @@ impl EvidenceStore {
         &self,
         observation: &Observation,
     ) -> Result<EvidenceEnvelope, EvidenceError> {
-        let envelope = self.put_json("observation", observation, true)?;
-        let path = self
-            .root
-            .join("observations")
-            .join(format!("{}.json", envelope.handle.replace(':', "-")));
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec(observation)?)?;
-        fs::rename(temporary, path)?;
-        Ok(envelope)
+        self.persist_json_observation("observation", observation)
     }
 
     pub fn persist_websocket_observation(
         &self,
         observation: &WebSocketObservation,
     ) -> Result<EvidenceEnvelope, EvidenceError> {
-        let envelope = self.put_json("websocket-observation", observation, true)?;
+        self.persist_json_observation("websocket-observation", observation)
+    }
+
+    fn persist_json_observation<T: Serialize>(
+        &self,
+        kind: &str,
+        observation: &T,
+    ) -> Result<EvidenceEnvelope, EvidenceError> {
+        let envelope = self.put_json(kind, observation, true)?;
         let path = self
             .root
             .join("observations")
