@@ -116,6 +116,7 @@ fn connect_websocket_resolving(
     if let Some(missing) = plan
         .required_grants
         .iter()
+        .filter(|grant| !is_websocket_transport_grant(grant))
         .find(|grant| !options.grants.contains(*grant))
     {
         return Ok(WebSocketConnectResult::Denied(denial(
@@ -142,15 +143,21 @@ fn connect_websocket_resolving(
                 Outcome::Error,
                 WebSocketTerminalCause::DnsFailure,
                 3,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                FailureDetails::default(),
             );
         }
     };
+    if let Some(missing) = plan
+        .required_grants
+        .iter()
+        .find(|grant| !options.grants.contains(*grant))
+    {
+        return Ok(WebSocketConnectResult::Denied(denial(
+            plan,
+            "invocation is missing a required capability",
+            missing,
+        )));
+    }
 
     let (request, redactions) = websocket_request(plan, options)?;
     let trace = store_websocket_trace(plan, store, &request, &redactions)?;
@@ -170,12 +177,10 @@ fn connect_websocket_resolving(
                 Outcome::Error,
                 WebSocketTerminalCause::ConnectTimeout,
                 3,
-                None,
-                None,
-                None,
-                None,
-                Some(trace.handle),
-                None,
+                FailureDetails {
+                    trace: Some(trace.handle),
+                    ..FailureDetails::default()
+                },
             );
         }
         Err(ConnectFailure::Connection) => {
@@ -186,12 +191,10 @@ fn connect_websocket_resolving(
                 Outcome::Error,
                 WebSocketTerminalCause::ConnectionFailure,
                 3,
-                None,
-                None,
-                None,
-                None,
-                Some(trace.handle),
-                None,
+                FailureDetails {
+                    trace: Some(trace.handle),
+                    ..FailureDetails::default()
+                },
             );
         }
     };
@@ -209,12 +212,11 @@ fn connect_websocket_resolving(
                 Outcome::Error,
                 WebSocketTerminalCause::TlsFailure,
                 3,
-                None,
-                None,
-                Some(selected_address),
-                None,
-                Some(trace.handle),
-                None,
+                FailureDetails {
+                    resolved: Some(selected_address),
+                    trace: Some(trace.handle),
+                    ..FailureDetails::default()
+                },
             );
         }
     };
@@ -243,12 +245,14 @@ fn connect_websocket_resolving(
                 failure.outcome,
                 failure.cause,
                 failure.exit,
-                failure.status,
-                subprotocol,
-                Some(selected_address),
-                handshake,
-                Some(trace.handle),
-                version,
+                FailureDetails {
+                    status: failure.status,
+                    subprotocol,
+                    resolved: Some(selected_address),
+                    handshake,
+                    trace: Some(trace.handle),
+                    http_version: version,
+                },
             );
         }
     };
@@ -277,6 +281,13 @@ fn connect_websocket_resolving(
             total_deadline,
         },
     )))
+}
+
+fn is_websocket_transport_grant(grant: &str) -> bool {
+    grant == "websocket:connect"
+        || grant == "net-insecure-websocket"
+        || grant.starts_with("net:")
+        || grant.starts_with("net-cidr:")
 }
 
 fn validate_transport_binding(plan: &WebSocketPlan, target: &Url) -> Result<(), ExecError> {
@@ -411,12 +422,31 @@ fn websocket_request(
     plan: &WebSocketPlan,
     options: &InvokeOptions,
 ) -> Result<(Request<()>, Vec<Vec<u8>>), ExecError> {
+    const HANDSHAKE_CONTROLLED_HEADERS: [&str; 9] = [
+        "host",
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "sec-websocket-extensions",
+        "content-length",
+        "transfer-encoding",
+    ];
     let mut request = plan
         .target
         .as_str()
         .into_client_request()
         .map_err(|_| ExecError::InvalidTarget("WebSocket request URI is invalid".into()))?;
     for planned in &plan.headers {
+        if HANDSHAKE_CONTROLLED_HEADERS
+            .iter()
+            .any(|owned| planned.name.eq_ignore_ascii_case(owned))
+        {
+            return Err(ExecError::InvalidHeader(
+                "planned header collides with a handshake-controlled header".into(),
+            ));
+        }
         insert_header(request.headers_mut(), &planned.name, &planned.value, false)?;
     }
     if let Some(origin) = &plan.origin {
@@ -486,6 +516,11 @@ fn build_tls_config(
 ) -> Result<Arc<ClientConfig>, ExecError> {
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        return Err(ExecError::Transport(
+            "native TLS trust store could not be loaded completely".into(),
+        ));
+    }
     roots.add_parsable_certificates(native.certs);
     for pem in &options.additional_root_certificates {
         let certificates: Vec<_> = CertificateDer::pem_slice_iter(pem)
@@ -662,6 +697,8 @@ fn perform_upgrade(
     let response = response.body(None).map_err(|_| handshake_check_failure())?;
 
     let expected_accept = {
+        // RFC 6455 section 4.1 mandates SHA-1 for Sec-WebSocket-Accept. This is a protocol
+        // constant, not a security hash.
         let mut hash = Sha1::new();
         hash.update(key.as_bytes());
         hash.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
@@ -684,14 +721,14 @@ fn perform_upgrade(
         .headers()
         .get_all("sec-websocket-accept")
         .iter()
-        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.to_str().unwrap_or("\0invalid"))
         .collect();
     let extensions_absent = !response.headers().contains_key("sec-websocket-extensions");
     let selected: Vec<_> = response
         .headers()
         .get_all("sec-websocket-protocol")
         .iter()
-        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.to_str().unwrap_or("\0invalid"))
         .collect();
     let subprotocol_valid = match selected.as_slice() {
         [] => offered_subprotocols.is_empty(),
@@ -732,7 +769,7 @@ fn store_websocket_trace(
 ) -> Result<kahea_core::EvidenceEnvelope, ExecError> {
     let trace = json!({
         "method": "GET",
-        "target": plan.target,
+        "target": redact_text(&plan.target, redactions),
         "headers": safe_headers(request.headers(), &plan.sensitive_headers, redactions, true),
     });
     Ok(store.put_json("websocket-trace", &trace, true)?)
@@ -842,7 +879,16 @@ fn io_handshake_failure(error: io::Error, tls: bool) -> HandshakeFailure {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Default)]
+struct FailureDetails {
+    status: Option<u16>,
+    subprotocol: Option<String>,
+    resolved: Option<SocketAddr>,
+    handshake: Option<String>,
+    trace: Option<String>,
+    http_version: Option<String>,
+}
+
 fn failed_observation(
     plan: &WebSocketPlan,
     store: &EvidenceStore,
@@ -850,12 +896,7 @@ fn failed_observation(
     outcome: Outcome,
     cause: WebSocketTerminalCause,
     exit: u8,
-    status: Option<u16>,
-    subprotocol: Option<String>,
-    resolved: Option<SocketAddr>,
-    handshake: Option<String>,
-    trace: Option<String>,
-    http_version: Option<String>,
+    details: FailureDetails,
 ) -> Result<WebSocketConnectResult, ExecError> {
     let elapsed = started.elapsed();
     let observation = WebSocketObservation {
@@ -868,18 +909,18 @@ fn failed_observation(
         tool_version: env!("CARGO_PKG_VERSION").into(),
         plan: plan.id.clone(),
         outcome,
-        handshake_status: status,
-        negotiated_subprotocol: subprotocol,
+        handshake_status: details.status,
+        negotiated_subprotocol: details.subprotocol,
         handshake_latency_ms: Some(elapsed.as_secs_f64() * 1_000.0),
         session_duration_ms: Some(elapsed.as_secs_f64() * 1_000.0),
         transcript: None,
-        handshake,
-        trace,
+        handshake: details.handshake,
+        trace: details.trace,
         close: None,
         terminal_cause: cause,
         counters: WebSocketCounters::default(),
-        resolved_origin: resolved.map(|address| address.to_string()),
-        http_version,
+        resolved_origin: details.resolved.map(|address| address.to_string()),
+        http_version: details.http_version,
         secret_refs: plan.secret_refs.clone(),
         runtime: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         exit,
@@ -1158,6 +1199,65 @@ mod tests {
     }
 
     #[test]
+    fn transport_grants_are_enforced_before_tcp_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let socket_plan = ws_plan(&listener);
+        let (root, store) = store();
+
+        let mut plaintext_options = options(&socket_plan);
+        plaintext_options.grants.remove("net-insecure-websocket");
+        let WebSocketConnectResult::Denied(denial) =
+            connect_websocket(&socket_plan, &plaintext_options, &store).unwrap()
+        else {
+            panic!("plaintext WebSocket without its grant must be denied")
+        };
+        assert_eq!(denial.required, "net-insecure-websocket");
+
+        let hostname_plan = plan(
+            format!("ws://socket.example.test:{}/socket", address.port()),
+            "net-cidr:127.0.0.1/32".into(),
+        );
+        let mut hostname_plan = hostname_plan;
+        hostname_plan
+            .required_grants
+            .push("net-insecure-websocket".into());
+        let hostname_plan = hostname_plan.seal().unwrap();
+        let mut unsafe_options = options(&hostname_plan);
+        unsafe_options.grants.remove("net-cidr:127.0.0.1/32");
+        let resolver = |_host: &str, port: u16| Ok(vec![SocketAddr::new(address.ip(), port)]);
+        let WebSocketConnectResult::Denied(denial) =
+            connect_websocket_resolving(&hostname_plan, &unsafe_options, &store, &resolver)
+                .unwrap()
+        else {
+            panic!("unsafe resolved address without its CIDR grant must be denied")
+        };
+        assert_eq!(denial.required, "net-cidr:127.0.0.1/32");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executor_rejects_handshake_controlled_planned_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.headers.push(PlannedHeader {
+            name: "Sec-WebSocket-Key".into(),
+            value: "attacker-controlled".into(),
+        });
+        assert!(matches!(
+            websocket_request(&plan, &options(&plan)),
+            Err(ExecError::InvalidHeader(message))
+                if message == "planned header collides with a handshake-controlled header"
+        ));
+    }
+
+    #[test]
     fn missing_auth_secret_is_rejected_before_tcp_connect() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1250,6 +1350,7 @@ mod tests {
     fn handshake_injects_sealed_intent_and_redacts_secrets_and_entropy() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut plan = ws_plan(&listener);
+        plan.target.push_str("?access_token=top-secret-value");
         plan.headers.push(PlannedHeader {
             name: "X-Client".into(),
             value: "kahea-test".into(),
@@ -1432,6 +1533,7 @@ mod tests {
     #[test]
     fn ipv6_loopback_handshake_uses_the_exact_runtime_grants() {
         let Ok(listener) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) else {
+            eprintln!("skipping IPv6 WebSocket test: IPv6 loopback is unavailable");
             return;
         };
         let plan = ws_plan(&listener);
