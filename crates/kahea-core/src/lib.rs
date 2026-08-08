@@ -277,6 +277,27 @@ impl From<serde_json::Error> for WebSocketPlanError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebSocketSessionSource {
+    pub kind: String,
+    pub version: u32,
+    pub operation_id: String,
+    pub url: String,
+    #[serde(default)]
+    pub risk: Option<RiskClass>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub auth: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub subprotocols: Vec<String>,
+    pub limits: WebSocketLimits,
+    pub actions: Vec<WebSocketAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WebSocketPlan {
     pub protocol: String,
     pub kind: String,
@@ -1184,6 +1205,7 @@ pub fn public_schema(name: &str) -> Option<Value> {
         "graph" => schemars::schema_for!(ApiGraphEnvelope),
         "plan" => schemars::schema_for!(RequestPlan),
         "observation" => schemars::schema_for!(Observation),
+        "websocket-session" => schemars::schema_for!(WebSocketSessionSource),
         "websocket-plan" => schemars::schema_for!(WebSocketPlan),
         "websocket-observation" => schemars::schema_for!(WebSocketObservation),
         "evidence" => schemars::schema_for!(EvidenceEnvelope),
@@ -1218,6 +1240,7 @@ mod tests {
             "graph",
             "plan",
             "observation",
+            "websocket-session",
             "websocket-plan",
             "websocket-observation",
             "evidence",
@@ -1851,6 +1874,10 @@ mod tests {
     #[test]
     fn websocket_public_schema_snapshot_is_stable() {
         for (name, expected) in [
+            (
+                "websocket-session",
+                "b3:30a0df8ad6dfb78e383f21cec9b0d3a945c98665ccfa96aa1a7046f893151885",
+            ),
             (
                 "websocket-plan",
                 "b3:2210f7f39fe5135f7b9da443018437f153e32c002145de62d1c3954528d92b88",

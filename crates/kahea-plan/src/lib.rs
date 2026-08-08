@@ -4,7 +4,7 @@ use base64::Engine;
 use kahea_core::{
     FieldDerivation, OperationIndexEnvelope, OperationSummary, PROTOCOL, PlannedAuth, PlannedBody,
     PlannedHeader, RequestPlan, RiskClass, VERSION, WebSocketAction, WebSocketLimits,
-    WebSocketPlan, default_config_fingerprint, digest, short_handle,
+    WebSocketPlan, WebSocketSessionSource, default_config_fingerprint, digest, short_handle,
 };
 use kahea_ingest::{OpenApiSource, OperationDefinition, parse_data_document};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -308,27 +308,6 @@ impl ProjectConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WebSocketSessionDocument {
-    kind: String,
-    version: u32,
-    operation_id: String,
-    url: String,
-    #[serde(default)]
-    risk: Option<kahea_core::RiskClass>,
-    #[serde(default)]
-    headers: BTreeMap<String, String>,
-    #[serde(default)]
-    auth: Option<String>,
-    #[serde(default)]
-    origin: Option<String>,
-    #[serde(default)]
-    subprotocols: Vec<String>,
-    limits: WebSocketLimits,
-    actions: Vec<WebSocketAction>,
-}
-
 fn self_as_value(configuration: &ProjectConfiguration) -> Result<Value, PlanError> {
     let text = toml::to_string(configuration)
         .map_err(|error| PlanError::Configuration(error.to_string()))?;
@@ -387,7 +366,7 @@ pub fn inspect_websocket_session(
 ) -> Result<OperationIndexEnvelope, PlanError> {
     let document = parse_data_document(path, bytes)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
-    let source: WebSocketSessionDocument = serde_json::from_value(document)
+    let source: WebSocketSessionSource = serde_json::from_value(document)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
     validate_websocket_source_identity(&source)?;
     let target = websocket_target(&source.url)?;
@@ -447,7 +426,7 @@ pub fn inspect_websocket_session(
     })
 }
 
-fn validate_websocket_source_identity(source: &WebSocketSessionDocument) -> Result<(), PlanError> {
+fn validate_websocket_source_identity(source: &WebSocketSessionSource) -> Result<(), PlanError> {
     if source.kind != "websocket-session" || source.version != 1 {
         return Err(PlanError::InvalidWebSocketSource(
             "kind must be websocket-session and version must be 1".into(),
@@ -471,7 +450,7 @@ pub fn build_websocket_plan_with_configuration(
 ) -> Result<WebSocketPlan, PlanError> {
     let document = parse_data_document(path, bytes)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
-    let mut source: WebSocketSessionDocument = serde_json::from_value(document)
+    let mut source: WebSocketSessionSource = serde_json::from_value(document)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
     validate_websocket_source_identity(&source)?;
 

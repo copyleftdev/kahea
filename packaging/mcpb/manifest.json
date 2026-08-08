@@ -3,8 +3,8 @@
   "name": "kahea",
   "display_name": "Kāhea",
   "version": "0.1.0",
-  "description": "Deterministic OpenAPI testing and policy-gated API execution for AI agents.",
-  "long_description": "Kāhea turns API descriptions and captured requests into sealed plans, invokes only with exact capability grants, and returns typed, replayable evidence.",
+  "description": "Deterministic HTTP and WebSocket testing with policy-gated execution for AI agents.",
+  "long_description": "Kāhea turns API descriptions, captured requests, workflows, and finite WebSocket sessions into sealed plans, invokes only with exact capability grants, and returns typed, replayable evidence.",
   "author": {
     "name": "copyleftdev",
     "url": "https://github.com/copyleftdev"
@@ -33,11 +33,11 @@
   "tools": [
     {
       "name": "kahea_inspect",
-      "description": "Discover API operations without network access."
+      "description": "Discover HTTP, workflow, and finite WebSocket operations without network access."
     },
     {
       "name": "kahea_plan",
-      "description": "Create an integrity-sealed request or conformance plan."
+      "description": "Create an integrity-sealed request, workflow, conformance, or finite WebSocket plan."
     },
     {
       "name": "kahea_invoke",
@@ -53,6 +53,7 @@
     "openapi",
     "api-testing",
     "contract-testing",
+    "websocket",
     "mcp",
     "ai-agents",
     "local-first"
