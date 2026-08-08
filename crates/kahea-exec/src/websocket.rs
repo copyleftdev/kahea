@@ -1542,11 +1542,13 @@ mod tests {
 
         let silent_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut silent_plan = ws_plan(&silent_listener);
-        silent_plan.limits.connect_timeout_ms = 30;
+        // Leave enough time for a loaded Windows runner to accept localhost; the peer then
+        // remains silent beyond the same bounded handshake deadline.
+        silent_plan.limits.connect_timeout_ms = 500;
         silent_plan = silent_plan.seal().unwrap();
         let silent_server = thread::spawn(move || {
             let _stream = accept_test_connection(&silent_listener);
-            thread::sleep(Duration::from_millis(80));
+            thread::sleep(Duration::from_millis(700));
         });
         let WebSocketConnectResult::Observation(observation) =
             connect_websocket(&silent_plan, &options(&silent_plan), &store).unwrap()
