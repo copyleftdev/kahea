@@ -438,7 +438,11 @@ pub fn build_websocket_plan_with_configuration(
     if target.scheme() == "ws" {
         grants.push("net-insecure-websocket".into());
     }
-    if let Ok(address) = host.parse::<IpAddr>()
+    let literal_host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = literal_host.parse::<IpAddr>()
         && is_unsafe_address(address)
     {
         grants.push(match address {
@@ -1763,6 +1767,15 @@ fn enforce_websocket_subprotocol_policy(
             "WebSocket subprotocol allowlist entries must be unique RFC tokens".into(),
         ));
     }
+    let mut requested = BTreeSet::new();
+    if subprotocols
+        .iter()
+        .any(|protocol| !valid_websocket_token(protocol) || !requested.insert(protocol))
+    {
+        return Err(PlanError::InvalidWebSocketSource(
+            "requested WebSocket subprotocols must be unique RFC tokens".into(),
+        ));
+    }
     if !configured.is_empty()
         && subprotocols
             .iter()
@@ -1823,6 +1836,16 @@ fn websocket_headers(
     let mut headers = Vec::with_capacity(source.len());
     for (name, value) in source {
         let normalized = name.to_ascii_lowercase();
+        if !valid_websocket_token(&name) {
+            return Err(PlanError::InvalidWebSocketSource(format!(
+                "header name {name:?} is not a valid HTTP token"
+            )));
+        }
+        if value.contains(['\r', '\n']) {
+            return Err(PlanError::InvalidWebSocketSource(format!(
+                "header {name:?} value contains a line break"
+            )));
+        }
         if forbidden.contains(&normalized.as_str())
             || configuration
                 .policy
@@ -1927,6 +1950,36 @@ fn effective_websocket_limits(
             "WebSocket policy maxima contradict their total or frame bounds".into(),
         ));
     }
+    let requested_values = [
+        requested.connect_timeout_ms,
+        requested.action_timeout_ms,
+        requested.idle_timeout_ms,
+        requested.close_timeout_ms,
+        requested.total_timeout_ms,
+        requested.max_frame_bytes,
+        requested.max_message_bytes,
+        requested.max_inbound_frames,
+        requested.max_outbound_frames,
+        requested.max_inbound_messages,
+        requested.max_outbound_messages,
+        requested.max_inbound_bytes,
+        requested.max_outbound_bytes,
+    ];
+    if requested_values.contains(&0) {
+        return Err(PlanError::InvalidWebSocketSource(
+            "requested WebSocket limits must all be positive".into(),
+        ));
+    }
+    if requested.max_message_bytes < requested.max_frame_bytes
+        || requested.connect_timeout_ms > requested.total_timeout_ms
+        || requested.action_timeout_ms > requested.total_timeout_ms
+        || requested.idle_timeout_ms > requested.total_timeout_ms
+        || requested.close_timeout_ms > requested.total_timeout_ms
+    {
+        return Err(PlanError::InvalidWebSocketSource(
+            "requested WebSocket limits contradict their total or frame bounds".into(),
+        ));
+    }
     Ok(WebSocketLimits {
         connect_timeout_ms: requested.connect_timeout_ms.min(maximum.connect_timeout_ms),
         action_timeout_ms: requested.action_timeout_ms.min(maximum.action_timeout_ms),
@@ -1960,9 +2013,15 @@ fn tighten_websocket_action_timeouts(actions: &mut [WebSocketAction], maximum: u
             | WebSocketAction::ExpectClose { timeout_ms, .. } => timeout_ms,
             _ => continue,
         };
-        if let Some(timeout) = timeout {
-            *timeout = (*timeout).min(maximum);
-        }
+        *timeout = Some(timeout.map_or(maximum, |value| value.min(maximum)));
+    }
+}
+
+fn origin_transport_scheme(scheme: &str) -> &str {
+    match scheme {
+        "wss" => "https",
+        "ws" => "http",
+        other => other,
     }
 }
 
@@ -1971,7 +2030,7 @@ fn configured_server_matches_target(server: &ConfiguredServer, target: &Url) -> 
         return false;
     }
     Url::parse(&server.url).is_ok_and(|configured| {
-        configured.scheme() == target.scheme()
+        origin_transport_scheme(configured.scheme()) == origin_transport_scheme(target.scheme())
             && configured
                 .host_str()
                 .zip(target.host_str())
@@ -2254,16 +2313,35 @@ paths:
 
     #[test]
     fn websocket_json_and_yaml_sources_share_the_same_contract() {
+        let configuration = websocket_configuration();
+        let json_plan = build_websocket_plan_with_configuration(
+            Path::new("session.json"),
+            include_bytes!("../../../fixtures/websocket/session.json"),
+            &configuration,
+        )
+        .unwrap();
         let fixture = include_bytes!("../../../fixtures/websocket/session.yaml");
         let fixture_plan = build_websocket_plan_with_configuration(
             Path::new("session.yaml"),
             fixture,
-            &websocket_configuration(),
+            &configuration,
         )
         .unwrap();
         assert!(fixture_plan.verify_seal().unwrap());
         assert_eq!(fixture_plan.target, "wss://socket.example.test/v1/events");
         assert_eq!(fixture_plan.actions.len(), 5);
+        assert_ne!(
+            fixture_plan.source_fingerprints,
+            json_plan.source_fingerprints
+        );
+        assert_eq!(fixture_plan.actions, json_plan.actions);
+        assert_eq!(fixture_plan.limits, json_plan.limits);
+        assert_eq!(
+            serde_json::to_value(&fixture_plan.headers).unwrap(),
+            serde_json::to_value(&json_plan.headers).unwrap()
+        );
+        assert_eq!(fixture_plan.required_grants, json_plan.required_grants);
+        assert_eq!(fixture_plan.handshake_checks, json_plan.handshake_checks);
 
         let yaml = r#"
 kind: websocket-session
@@ -2385,6 +2463,14 @@ actions:
         cases.push(source);
 
         let mut source = websocket_source();
+        source["headers"] = json!({"Bad Header":"value"});
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["headers"] = json!({"Bad:Header":"value"});
+        cases.push(source);
+
+        let mut source = websocket_source();
         source["origin"] = json!("https://client.example.test/not-an-origin");
         cases.push(source);
 
@@ -2405,12 +2491,32 @@ actions:
         cases.push(source);
 
         let mut source = websocket_source();
+        source["limits"]["unexpected"] = json!(1);
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["actions"][0]["unexpected"] = json!(true);
+        cases.push(source);
+
+        let mut source = websocket_source();
         source.as_object_mut().unwrap().remove("limits");
         cases.push(source);
 
         let mut source = websocket_source();
         source["actions"] = json!([{"type":"send-text","text":"never terminal"}]);
         cases.push(source);
+
+        for invalid in [
+            json!([""]),
+            json!(["chat.v1", "chat.v1"]),
+            json!(["bad protocol"]),
+            json!(["bad,protocol"]),
+            json!(["bad\r\nprotocol"]),
+        ] {
+            let mut source = websocket_source();
+            source["subprotocols"] = invalid;
+            cases.push(source);
+        }
 
         let mut source = websocket_source();
         source["unexpected"] = json!(true);
@@ -2464,6 +2570,16 @@ actions:
         assert!(matches!(
             websocket_plan_from_value(&source, &configuration),
             Err(PlanError::PolicyDenied(_))
+        ));
+
+        let default = ProjectConfiguration::default();
+        assert!(matches!(
+            enforce_websocket_subprotocol_policy(&[String::new()], &default),
+            Err(PlanError::InvalidWebSocketSource(_))
+        ));
+        assert!(matches!(
+            enforce_websocket_subprotocol_policy(&["chat.v1".into(), "chat.v1".into()], &default),
+            Err(PlanError::InvalidWebSocketSource(_))
         ));
 
         configuration.policy.denied_hosts.clear();
@@ -2587,7 +2703,7 @@ actions:
             configuration.policy.sensitive_headers = vec![invalid.into()];
             assert!(matches!(
                 websocket_plan_from_value(&source, &configuration),
-                Err(PlanError::Configuration(_)) | Err(PlanError::InvalidWebSocketSource(_))
+                Err(PlanError::Configuration(_))
             ));
         }
 
@@ -2670,6 +2786,115 @@ actions:
             };
             assert_eq!(timeout, Some(1_000));
         }
+
+        let mut source = websocket_source();
+        source["actions"] = json!([
+            {"type":"expect-text","equals":"ready"},
+            {"type":"expect-binary","payload_base64":"AA=="},
+            {"type":"expect-json","equals":{"ready":true}},
+            {"type":"expect-pong","payload_base64":""},
+            {"type":"expect-close","codes":[1000]}
+        ]);
+        let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+        for action in plan.actions {
+            let timeout = match action {
+                WebSocketAction::ExpectText { timeout_ms, .. }
+                | WebSocketAction::ExpectBinary { timeout_ms, .. }
+                | WebSocketAction::ExpectJson { timeout_ms, .. }
+                | WebSocketAction::ExpectPong { timeout_ms, .. }
+                | WebSocketAction::ExpectClose { timeout_ms, .. } => timeout_ms,
+                _ => unreachable!(),
+            };
+            assert_eq!(timeout, Some(1_000));
+        }
+    }
+
+    #[test]
+    fn websocket_requested_limit_relationships_fail_before_clamping() {
+        let configuration = websocket_configuration();
+        for field in [
+            "connect_timeout_ms",
+            "action_timeout_ms",
+            "idle_timeout_ms",
+            "close_timeout_ms",
+            "total_timeout_ms",
+            "max_frame_bytes",
+            "max_message_bytes",
+            "max_inbound_frames",
+            "max_outbound_frames",
+            "max_inbound_messages",
+            "max_outbound_messages",
+            "max_inbound_bytes",
+            "max_outbound_bytes",
+        ] {
+            let mut source = websocket_source();
+            source["limits"][field] = json!(0);
+            assert!(matches!(
+                websocket_plan_from_value(&source, &configuration),
+                Err(PlanError::InvalidWebSocketSource(_))
+            ));
+        }
+
+        let requested: WebSocketLimits =
+            serde_json::from_value(websocket_source()["limits"].clone()).unwrap();
+        assert!(effective_websocket_limits(requested.clone(), &configuration).is_ok());
+
+        let mut source = websocket_source();
+        source["limits"]["max_frame_bytes"] = json!(4_194_304);
+        source["limits"]["max_message_bytes"] = json!(4_194_303);
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::InvalidWebSocketSource(_))
+        ));
+
+        let mut invalid = requested.clone();
+        invalid.max_message_bytes = invalid.max_frame_bytes - 1;
+        assert!(matches!(
+            effective_websocket_limits(invalid, &configuration),
+            Err(PlanError::InvalidWebSocketSource(_))
+        ));
+
+        for field in [
+            "connect_timeout_ms",
+            "action_timeout_ms",
+            "idle_timeout_ms",
+            "close_timeout_ms",
+        ] {
+            let mut source = websocket_source();
+            source["limits"][field] = json!(15_001);
+            assert!(matches!(
+                websocket_plan_from_value(&source, &configuration),
+                Err(PlanError::InvalidWebSocketSource(_))
+            ));
+        }
+
+        for field in [
+            "connect_timeout_ms",
+            "action_timeout_ms",
+            "idle_timeout_ms",
+            "close_timeout_ms",
+        ] {
+            let mut invalid = requested.clone();
+            match field {
+                "connect_timeout_ms" => invalid.connect_timeout_ms = invalid.total_timeout_ms + 1,
+                "action_timeout_ms" => invalid.action_timeout_ms = invalid.total_timeout_ms + 1,
+                "idle_timeout_ms" => invalid.idle_timeout_ms = invalid.total_timeout_ms + 1,
+                "close_timeout_ms" => invalid.close_timeout_ms = invalid.total_timeout_ms + 1,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                effective_websocket_limits(invalid, &configuration),
+                Err(PlanError::InvalidWebSocketSource(_))
+            ));
+        }
+
+        let mut inclusive = requested;
+        inclusive.max_message_bytes = inclusive.max_frame_bytes;
+        inclusive.connect_timeout_ms = inclusive.total_timeout_ms;
+        inclusive.action_timeout_ms = inclusive.total_timeout_ms;
+        inclusive.idle_timeout_ms = inclusive.total_timeout_ms;
+        inclusive.close_timeout_ms = inclusive.total_timeout_ms;
+        assert!(effective_websocket_limits(inclusive, &configuration).is_ok());
     }
 
     #[test]
@@ -2734,6 +2959,16 @@ actions:
         receive_only["risk"] = json!("read");
         let declared_read = websocket_plan_from_value(&receive_only, &configuration).unwrap();
         assert_eq!(declared_read.risk, kahea_core::RiskClass::Read);
+
+        let mut ipv6 = receive_only;
+        ipv6["url"] = json!("ws://[::1]:8080/events");
+        configuration.policy.allowed_hosts = vec!["[::1]".into()];
+        let ipv6_plan = websocket_plan_from_value(&ipv6, &configuration).unwrap();
+        assert!(
+            ipv6_plan
+                .required_grants
+                .contains(&"net-cidr:::1/128".into())
+        );
     }
 
     #[test]
@@ -2770,6 +3005,23 @@ actions:
                 "incorrectly matched {classification} server {url}"
             );
         }
+
+        let mut secure_source = websocket_source();
+        secure_source.as_object_mut().unwrap().remove("auth");
+        let mut configuration = websocket_configuration();
+        configuration.servers.insert(
+            "production".into(),
+            ConfiguredServer {
+                url: "https://socket.example.test".into(),
+                classification: Some("production".into()),
+            },
+        );
+        let secure = websocket_plan_from_value(&secure_source, &configuration).unwrap();
+        assert!(
+            secure
+                .required_grants
+                .contains(&"approve:production-write".into())
+        );
     }
 
     #[test]
