@@ -116,7 +116,7 @@ fn connect_websocket_resolving(
     if let Some(missing) = plan
         .required_grants
         .iter()
-        .filter(|grant| !is_websocket_transport_grant(grant))
+        .filter(|grant| !is_address_dependent_grant(grant))
         .find(|grant| !options.grants.contains(*grant))
     {
         return Ok(WebSocketConnectResult::Denied(denial(
@@ -283,11 +283,8 @@ fn connect_websocket_resolving(
     )))
 }
 
-fn is_websocket_transport_grant(grant: &str) -> bool {
-    grant == "websocket:connect"
-        || grant == "net-insecure-websocket"
-        || grant.starts_with("net:")
-        || grant.starts_with("net-cidr:")
+fn is_address_dependent_grant(grant: &str) -> bool {
+    grant.starts_with("net-cidr:")
 }
 
 fn validate_transport_binding(plan: &WebSocketPlan, target: &Url) -> Result<(), ExecError> {
@@ -1247,6 +1244,22 @@ mod tests {
             panic!("plaintext WebSocket without its grant must be denied")
         };
         assert_eq!(denial.required, "net-insecure-websocket");
+
+        let mut missing_connect_options = options(&socket_plan);
+        missing_connect_options.grants.remove("websocket:connect");
+        let resolver_calls = std::cell::Cell::new(0_u8);
+        let resolver = |_host: &str, _port: u16| {
+            resolver_calls.set(resolver_calls.get() + 1);
+            Ok(vec![address])
+        };
+        let WebSocketConnectResult::Denied(denial) =
+            connect_websocket_resolving(&socket_plan, &missing_connect_options, &store, &resolver)
+                .unwrap()
+        else {
+            panic!("missing WebSocket connect grant must be denied")
+        };
+        assert_eq!(denial.required, "websocket:connect");
+        assert_eq!(resolver_calls.get(), 0);
 
         let hostname_plan = plan(
             format!("ws://socket.example.test:{}/socket", address.port()),
