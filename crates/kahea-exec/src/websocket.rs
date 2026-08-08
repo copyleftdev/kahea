@@ -1172,6 +1172,8 @@ mod tests {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // Accepted sockets inherit O_NONBLOCK on some Unix platforms.
+                    stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
                     stream.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
                     return stream;
