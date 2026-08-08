@@ -1,4 +1,7 @@
-use super::{ExecError, InvokeOptions, secret_redactions, unsafe_address, validate_schema_value};
+use super::{
+    ExecError, InvokeOptions, redact_bytes, redact_json_pointers, secret_redactions,
+    unsafe_address, validate_schema_value,
+};
 use base64::Engine;
 use kahea_core::{
     DenialEnvelope, Outcome, PROTOCOL, VERSION, WebSocketAction, WebSocketCloseInitiator,
@@ -221,6 +224,7 @@ pub struct WebSocketConnection {
     started: Instant,
     total_deadline: Instant,
     accounting: Arc<Mutex<WireAccounting>>,
+    redactions: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Default)]
@@ -278,6 +282,36 @@ pub enum WebSocketConnectResult {
     Connected(Box<WebSocketConnection>),
     Observation(Box<WebSocketObservation>),
     Denied(DenialEnvelope),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TranscriptPayloadKind {
+    Text,
+    Binary,
+    Control,
+}
+
+#[derive(Debug)]
+struct TranscriptEntry {
+    direction: &'static str,
+    kind: &'static str,
+    bytes: u64,
+    action_index: Option<usize>,
+    check: &'static str,
+    code: Option<u16>,
+    payload_kind: Option<TranscriptPayloadKind>,
+    payload: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Default)]
+struct Transcript {
+    entries: Vec<TranscriptEntry>,
+}
+
+impl Transcript {
+    fn push(&mut self, entry: TranscriptEntry) {
+        self.entries.push(entry);
+    }
 }
 
 impl WebSocketConnectResult {
@@ -558,6 +592,7 @@ fn connect_websocket_resolving_cancellable(
             started,
             total_deadline,
             accounting,
+            redactions,
         },
     )))
 }
@@ -605,8 +640,9 @@ fn execute_connected_websocket(
     store: &EvidenceStore,
 ) -> Result<WebSocketConnectResult, ExecError> {
     let mut counters = WebSocketCounters::default();
+    let mut transcript = Transcript::default();
     let mut terminal = None;
-    for action in &plan.actions {
+    for (action_index, action) in plan.actions.iter().enumerate() {
         let action_deadline = action_deadline(&connection, plan, action);
         let expected_payload = match action {
             WebSocketAction::ExpectBinary { payload_base64, .. }
@@ -616,57 +652,72 @@ fn execute_connected_websocket(
             _ => None,
         };
         let result = match action {
-            WebSocketAction::SendText { text } => send_message(
+            WebSocketAction::SendText { text } => send_recorded(
                 &mut connection,
                 plan,
                 &mut counters,
                 Message::Text(text.clone().into()),
                 true,
-                text.len() as u64,
+                text.as_bytes(),
                 action_deadline,
+                &mut transcript,
+                action_index,
+                "text",
+                TranscriptPayloadKind::Text,
             )
             .map(|()| None),
             WebSocketAction::SendBinary { payload_base64 } => {
                 let payload =
                     decode_sealed_base64(payload_base64).map_err(|()| ExecError::InvalidSeal)?;
-                let bytes = payload.len() as u64;
-                send_message(
+                send_recorded(
                     &mut connection,
                     plan,
                     &mut counters,
-                    Message::Binary(payload.into()),
+                    Message::Binary(payload.clone().into()),
                     true,
-                    bytes,
+                    &payload,
                     action_deadline,
+                    &mut transcript,
+                    action_index,
+                    "binary",
+                    TranscriptPayloadKind::Binary,
                 )
                 .map(|()| None)
             }
             WebSocketAction::Ping { payload_base64 } => {
                 let payload =
                     decode_sealed_base64(payload_base64).map_err(|()| ExecError::InvalidSeal)?;
-                let bytes = payload.len() as u64;
-                send_message(
+                send_recorded(
                     &mut connection,
                     plan,
                     &mut counters,
-                    Message::Ping(payload.into()),
+                    Message::Ping(payload.clone().into()),
                     false,
-                    bytes,
+                    &payload,
                     action_deadline,
+                    &mut transcript,
+                    action_index,
+                    "ping",
+                    TranscriptPayloadKind::Control,
                 )
                 .map(|()| None)
             }
-            WebSocketAction::Close { code, reason } => {
-                execute_client_close(&mut connection, plan, &mut counters, *code, reason).map(
-                    |()| {
-                        Some(WebSocketCloseObservation {
-                            initiator: WebSocketCloseInitiator::Client,
-                            code: *code,
-                            reason: reason.clone(),
-                        })
-                    },
-                )
-            }
+            WebSocketAction::Close { code, reason } => execute_client_close(
+                &mut connection,
+                plan,
+                &mut counters,
+                *code,
+                reason,
+                &mut transcript,
+                action_index,
+            )
+            .map(|()| {
+                Some(WebSocketCloseObservation {
+                    initiator: WebSocketCloseInitiator::Client,
+                    code: *code,
+                    reason: reason.clone(),
+                })
+            }),
             expectation => read_expectation(
                 &mut connection,
                 plan,
@@ -674,6 +725,8 @@ fn execute_connected_websocket(
                 expectation,
                 expected_payload.as_deref(),
                 action_deadline,
+                &mut transcript,
+                action_index,
             ),
         };
         match result {
@@ -689,7 +742,43 @@ fn execute_connected_websocket(
         }
     }
     let terminal = terminal.unwrap_or_else(|| SessionTerminal::passed(None));
-    finish_session(plan, connection, store, counters, terminal)
+    finish_session(plan, connection, store, counters, transcript, terminal)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_recorded(
+    connection: &mut WebSocketConnection,
+    plan: &WebSocketPlan,
+    counters: &mut WebSocketCounters,
+    message: Message,
+    data_message: bool,
+    payload: &[u8],
+    phase_deadline: Instant,
+    transcript: &mut Transcript,
+    action_index: usize,
+    kind: &'static str,
+    payload_kind: TranscriptPayloadKind,
+) -> Result<(), SessionTerminal> {
+    send_message(
+        connection,
+        plan,
+        counters,
+        message,
+        data_message,
+        payload.len() as u64,
+        phase_deadline,
+    )?;
+    transcript.push(TranscriptEntry {
+        direction: "outbound",
+        kind,
+        bytes: payload.len() as u64,
+        action_index: Some(action_index),
+        check: "sent",
+        code: None,
+        payload_kind: Some(payload_kind),
+        payload: Some(payload.to_vec()),
+    });
+    Ok(())
 }
 
 fn action_deadline(
@@ -785,6 +874,7 @@ fn send_message(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_expectation(
     connection: &mut WebSocketConnection,
     plan: &WebSocketPlan,
@@ -792,6 +882,8 @@ fn read_expectation(
     action: &WebSocketAction,
     expected_payload: Option<&[u8]>,
     phase_deadline: Instant,
+    transcript: &mut Transcript,
+    action_index: usize,
 ) -> Result<Option<WebSocketCloseObservation>, SessionTerminal> {
     loop {
         let timeout_cause = configure_session_deadline(
@@ -809,6 +901,16 @@ fn read_expectation(
         account_inbound(plan, counters, &message)?;
         match message {
             Message::Ping(payload) => {
+                transcript.push(TranscriptEntry {
+                    direction: "inbound",
+                    kind: "ping",
+                    bytes: payload.len() as u64,
+                    action_index: Some(action_index),
+                    check: "automatic",
+                    code: None,
+                    payload_kind: Some(TranscriptPayloadKind::Control),
+                    payload: Some(payload.to_vec()),
+                });
                 account_automatic_control(plan, counters, payload.len() as u64)?;
                 let timeout_cause = configure_session_deadline(
                     connection,
@@ -821,16 +923,47 @@ fn read_expectation(
                     return Err(socket_error(connection, error, timeout_cause));
                 }
                 sync_wire_counters(connection, counters)?;
+                transcript.push(TranscriptEntry {
+                    direction: "outbound",
+                    kind: "pong",
+                    bytes: payload.len() as u64,
+                    action_index: Some(action_index),
+                    check: "automatic",
+                    code: None,
+                    payload_kind: Some(TranscriptPayloadKind::Control),
+                    payload: Some(payload.to_vec()),
+                });
             }
             Message::Pong(payload) => {
-                if matches!(action, WebSocketAction::ExpectPong { .. })
-                    && expected_payload.is_some_and(|expected| payload.as_ref() == expected)
-                {
+                let matched = matches!(action, WebSocketAction::ExpectPong { .. })
+                    && expected_payload.is_some_and(|expected| payload.as_ref() == expected);
+                transcript.push(TranscriptEntry {
+                    direction: "inbound",
+                    kind: "pong",
+                    bytes: payload.len() as u64,
+                    action_index: Some(action_index),
+                    check: if matched { "matched" } else { "ignored" },
+                    code: None,
+                    payload_kind: Some(TranscriptPayloadKind::Control),
+                    payload: Some(payload.to_vec()),
+                });
+                if matched {
                     return Ok(None);
                 }
             }
             Message::Text(actual) => {
-                return if expectation_matches_text(action, actual.as_str()) {
+                let matched = expectation_matches_text(action, actual.as_str());
+                transcript.push(TranscriptEntry {
+                    direction: "inbound",
+                    kind: "text",
+                    bytes: actual.len() as u64,
+                    action_index: Some(action_index),
+                    check: if matched { "matched" } else { "mismatched" },
+                    code: None,
+                    payload_kind: Some(TranscriptPayloadKind::Text),
+                    payload: Some(actual.as_bytes().to_vec()),
+                });
+                return if matched {
                     Ok(None)
                 } else {
                     Err(SessionTerminal::failed(
@@ -839,9 +972,19 @@ fn read_expectation(
                 };
             }
             Message::Binary(actual) => {
-                return if matches!(action, WebSocketAction::ExpectBinary { .. })
-                    && expected_payload.is_some_and(|expected| actual.as_ref() == expected)
-                {
+                let matched = matches!(action, WebSocketAction::ExpectBinary { .. })
+                    && expected_payload.is_some_and(|expected| actual.as_ref() == expected);
+                transcript.push(TranscriptEntry {
+                    direction: "inbound",
+                    kind: "binary",
+                    bytes: actual.len() as u64,
+                    action_index: Some(action_index),
+                    check: if matched { "matched" } else { "mismatched" },
+                    code: None,
+                    payload_kind: Some(TranscriptPayloadKind::Binary),
+                    payload: Some(actual.to_vec()),
+                });
+                return if matched {
                     Ok(None)
                 } else {
                     Err(SessionTerminal::failed(
@@ -851,14 +994,40 @@ fn read_expectation(
             }
             Message::Close(frame) => {
                 let close = close_observation(WebSocketCloseInitiator::Server, frame.as_ref());
+                let matched = if let WebSocketAction::ExpectClose { codes, reason, .. } = action {
+                    close_matches(frame.as_ref(), codes, reason.as_deref())
+                } else {
+                    false
+                };
+                let reason = frame
+                    .as_ref()
+                    .map_or_else(Vec::new, |frame| frame.reason.as_bytes().to_vec());
+                transcript.push(TranscriptEntry {
+                    direction: "inbound",
+                    kind: "close",
+                    bytes: close_payload_bytes(frame.as_ref()),
+                    action_index: Some(action_index),
+                    check: if matched { "matched" } else { "mismatched" },
+                    code: frame.as_ref().map(|frame| u16::from(frame.code)),
+                    payload_kind: Some(TranscriptPayloadKind::Text),
+                    payload: Some(reason.clone()),
+                });
                 account_automatic_control(plan, counters, close_payload_bytes(frame.as_ref()))?;
                 if let Err(error) = connection.socket.flush() {
                     return Err(socket_error(connection, error, timeout_cause));
                 }
                 sync_wire_counters(connection, counters)?;
-                return if let WebSocketAction::ExpectClose { codes, reason, .. } = action
-                    && close_matches(frame.as_ref(), codes, reason.as_deref())
-                {
+                transcript.push(TranscriptEntry {
+                    direction: "outbound",
+                    kind: "close",
+                    bytes: close_payload_bytes(frame.as_ref()),
+                    action_index: Some(action_index),
+                    check: "automatic",
+                    code: frame.as_ref().map(|frame| u16::from(frame.code)),
+                    payload_kind: Some(TranscriptPayloadKind::Text),
+                    payload: Some(reason),
+                });
+                return if matched {
                     Ok(Some(close))
                 } else {
                     Err(SessionTerminal {
@@ -869,7 +1038,17 @@ fn read_expectation(
                     })
                 };
             }
-            Message::Frame(_) => {
+            Message::Frame(frame) => {
+                transcript.push(TranscriptEntry {
+                    direction: "inbound",
+                    kind: "frame",
+                    bytes: frame.payload().len() as u64,
+                    action_index: Some(action_index),
+                    check: "protocol-error",
+                    code: None,
+                    payload_kind: Some(TranscriptPayloadKind::Binary),
+                    payload: Some(frame.payload().to_vec()),
+                });
                 return Err(SessionTerminal::error(
                     WebSocketTerminalCause::ProtocolViolation,
                 ));
@@ -884,6 +1063,8 @@ fn execute_client_close(
     counters: &mut WebSocketCounters,
     code: u16,
     reason: &str,
+    transcript: &mut Transcript,
+    action_index: usize,
 ) -> Result<(), SessionTerminal> {
     let phase_deadline =
         deadline(Instant::now(), plan.limits.close_timeout_ms).min(connection.total_deadline);
@@ -900,6 +1081,16 @@ fn execute_client_close(
         reason.len() as u64 + 2,
         phase_deadline,
     )?;
+    transcript.push(TranscriptEntry {
+        direction: "outbound",
+        kind: "close",
+        bytes: reason.len() as u64 + 2,
+        action_index: Some(action_index),
+        check: "sent",
+        code: Some(code),
+        payload_kind: Some(TranscriptPayloadKind::Text),
+        payload: Some(reason.as_bytes().to_vec()),
+    });
     loop {
         let timeout_cause = configure_session_deadline(
             connection,
@@ -914,15 +1105,101 @@ fn execute_client_close(
                 account_inbound(plan, counters, &message)?;
                 match message {
                     Message::Ping(payload) => {
+                        transcript.push(TranscriptEntry {
+                            direction: "inbound",
+                            kind: "ping",
+                            bytes: payload.len() as u64,
+                            action_index: Some(action_index),
+                            check: "automatic",
+                            code: None,
+                            payload_kind: Some(TranscriptPayloadKind::Control),
+                            payload: Some(payload.to_vec()),
+                        });
                         account_automatic_control(plan, counters, payload.len() as u64)?;
                         if let Err(error) = connection.socket.flush() {
                             return Err(socket_error(connection, error, timeout_cause));
                         }
                         sync_wire_counters(connection, counters)?;
+                        transcript.push(TranscriptEntry {
+                            direction: "outbound",
+                            kind: "pong",
+                            bytes: payload.len() as u64,
+                            action_index: Some(action_index),
+                            check: "automatic",
+                            code: None,
+                            payload_kind: Some(TranscriptPayloadKind::Control),
+                            payload: Some(payload.to_vec()),
+                        });
                     }
-                    Message::Close(_) => return Ok(()),
-                    Message::Pong(_) => {}
-                    Message::Text(_) | Message::Binary(_) | Message::Frame(_) => {
+                    Message::Close(frame) => {
+                        let reason = frame
+                            .as_ref()
+                            .map_or_else(Vec::new, |frame| frame.reason.as_bytes().to_vec());
+                        transcript.push(TranscriptEntry {
+                            direction: "inbound",
+                            kind: "close",
+                            bytes: close_payload_bytes(frame.as_ref()),
+                            action_index: Some(action_index),
+                            check: "acknowledged",
+                            code: frame.as_ref().map(|frame| u16::from(frame.code)),
+                            payload_kind: Some(TranscriptPayloadKind::Text),
+                            payload: Some(reason),
+                        });
+                        return Ok(());
+                    }
+                    Message::Pong(payload) => {
+                        transcript.push(TranscriptEntry {
+                            direction: "inbound",
+                            kind: "pong",
+                            bytes: payload.len() as u64,
+                            action_index: Some(action_index),
+                            check: "ignored",
+                            code: None,
+                            payload_kind: Some(TranscriptPayloadKind::Control),
+                            payload: Some(payload.to_vec()),
+                        });
+                    }
+                    Message::Text(payload) => {
+                        transcript.push(TranscriptEntry {
+                            direction: "inbound",
+                            kind: "text",
+                            bytes: payload.len() as u64,
+                            action_index: Some(action_index),
+                            check: "unexpected",
+                            code: None,
+                            payload_kind: Some(TranscriptPayloadKind::Text),
+                            payload: Some(payload.as_bytes().to_vec()),
+                        });
+                        return Err(SessionTerminal::failed(
+                            WebSocketTerminalCause::ExpectationFailed,
+                        ));
+                    }
+                    Message::Binary(payload) => {
+                        transcript.push(TranscriptEntry {
+                            direction: "inbound",
+                            kind: "binary",
+                            bytes: payload.len() as u64,
+                            action_index: Some(action_index),
+                            check: "unexpected",
+                            code: None,
+                            payload_kind: Some(TranscriptPayloadKind::Binary),
+                            payload: Some(payload.to_vec()),
+                        });
+                        return Err(SessionTerminal::failed(
+                            WebSocketTerminalCause::ExpectationFailed,
+                        ));
+                    }
+                    Message::Frame(frame) => {
+                        transcript.push(TranscriptEntry {
+                            direction: "inbound",
+                            kind: "frame",
+                            bytes: frame.payload().len() as u64,
+                            action_index: Some(action_index),
+                            check: "protocol-error",
+                            code: None,
+                            payload_kind: Some(TranscriptPayloadKind::Binary),
+                            payload: Some(frame.payload().to_vec()),
+                        });
                         return Err(SessionTerminal::failed(
                             WebSocketTerminalCause::ExpectationFailed,
                         ));
@@ -1124,7 +1401,8 @@ fn finish_session(
     connection: WebSocketConnection,
     store: &EvidenceStore,
     mut counters: WebSocketCounters,
-    terminal: SessionTerminal,
+    transcript: Transcript,
+    mut terminal: SessionTerminal,
 ) -> Result<WebSocketConnectResult, ExecError> {
     if let Ok(accounting) = connection.accounting.lock() {
         counters.inbound_frames = accounting.counters.inbound_frames;
@@ -1132,6 +1410,18 @@ fn finish_session(
         counters.inbound_bytes = accounting.counters.inbound_bytes;
         counters.outbound_bytes = accounting.counters.outbound_bytes;
     }
+    if let Some(close) = &mut terminal.close {
+        sanitize_close(close, &connection.redactions);
+    }
+    let transcript = store_transcript(
+        plan,
+        store,
+        &transcript,
+        &connection.redactions,
+        terminal.outcome.clone(),
+        terminal.cause,
+        terminal.exit,
+    )?;
     let observation = WebSocketObservation {
         protocol: PROTOCOL.into(),
         kind: "websocket-observation".into(),
@@ -1146,7 +1436,7 @@ fn finish_session(
         negotiated_subprotocol: connection.metadata.negotiated_subprotocol,
         handshake_latency_ms: Some(connection.metadata.latency.as_secs_f64() * 1_000.0),
         session_duration_ms: Some(connection.started.elapsed().as_secs_f64() * 1_000.0),
-        transcript: None,
+        transcript: Some(transcript.handle),
         handshake: Some(connection.metadata.handshake),
         trace: Some(connection.metadata.trace),
         close: terminal.close,
@@ -1686,11 +1976,103 @@ fn store_websocket_trace(
     redactions: &[Vec<u8>],
 ) -> Result<kahea_core::EvidenceEnvelope, ExecError> {
     let trace = json!({
-        "method": "GET",
-        "target": redact_text(&plan.target, redactions),
-        "headers": safe_headers(request.headers(), &plan.sensitive_headers, redactions, true),
+        "request": {
+            "method": "GET",
+            "target": redact_text(&plan.target, redactions),
+            "headers": safe_headers(request.headers(), &plan.sensitive_headers, redactions, true),
+        },
     });
     Ok(store.put_json("websocket-trace", &trace, true)?)
+}
+
+fn store_transcript(
+    plan: &WebSocketPlan,
+    store: &EvidenceStore,
+    transcript: &Transcript,
+    redactions: &[Vec<u8>],
+    outcome: Outcome,
+    cause: WebSocketTerminalCause,
+    exit: u8,
+) -> Result<kahea_core::EvidenceEnvelope, ExecError> {
+    let mut entries = Vec::with_capacity(transcript.entries.len());
+    for (sequence, entry) in transcript.entries.iter().enumerate() {
+        let payload = entry
+            .payload
+            .as_deref()
+            .zip(entry.payload_kind)
+            .map(|(payload, payload_kind)| {
+                store_transcript_payload(
+                    plan,
+                    store,
+                    entry.direction,
+                    payload_kind,
+                    payload,
+                    redactions,
+                )
+            })
+            .transpose()?
+            .map(|envelope| envelope.handle);
+        entries.push(json!({
+            "sequence": sequence,
+            "direction": entry.direction,
+            "kind": entry.kind,
+            "bytes": entry.bytes,
+            "action_index": entry.action_index,
+            "check": entry.check,
+            "code": entry.code,
+            "payload": payload,
+        }));
+    }
+    let value = json!({
+        "version": 1,
+        "entries": entries,
+        "terminal": {
+            "outcome": outcome,
+            "cause": cause,
+            "exit": exit,
+        },
+    });
+    Ok(store.put_json("transcript", &value, true)?)
+}
+
+fn store_transcript_payload(
+    plan: &WebSocketPlan,
+    store: &EvidenceStore,
+    direction: &str,
+    kind: TranscriptPayloadKind,
+    payload: &[u8],
+    redactions: &[Vec<u8>],
+) -> Result<kahea_core::EvidenceEnvelope, ExecError> {
+    let configured = if direction == "inbound" && matches!(kind, TranscriptPayloadKind::Text) {
+        redact_json_pointers(payload, &plan.redact_response_json_pointers)
+    } else {
+        payload.to_vec()
+    };
+    let redacted = redact_bytes(&configured, redactions);
+    let (evidence_kind, media_type) = match kind {
+        TranscriptPayloadKind::Text if serde_json::from_slice::<Value>(&redacted).is_ok() => {
+            ("websocket-json", "application/json")
+        }
+        TranscriptPayloadKind::Text => ("websocket-text", "text/plain; charset=utf-8"),
+        TranscriptPayloadKind::Binary => ("websocket-binary", "application/octet-stream"),
+        TranscriptPayloadKind::Control => ("websocket-control", "application/octet-stream"),
+    };
+    Ok(store.put_blob(evidence_kind, media_type, &redacted, true)?)
+}
+
+fn sanitize_close(close: &mut WebSocketCloseObservation, redactions: &[Vec<u8>]) {
+    close.reason = bounded_text(&redact_text(&close.reason, redactions), 256);
+}
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 fn store_handshake(
@@ -1700,9 +2082,11 @@ fn store_handshake(
     redactions: &[Vec<u8>],
 ) -> Result<kahea_core::EvidenceEnvelope, ExecError> {
     let evidence = json!({
-        "status": response.status().as_u16(),
-        "http_version": http_version(response.version()),
-        "headers": safe_headers(response.headers(), &plan.sensitive_headers, redactions, false),
+        "response": {
+            "status": response.status().as_u16(),
+            "http_version": http_version(response.version()),
+            "headers": safe_headers(response.headers(), &plan.sensitive_headers, redactions, false),
+        },
     });
     Ok(store.put_json("websocket-handshake", &evidence, true)?)
 }
@@ -1823,6 +2207,15 @@ fn failed_observation(
     details: FailureDetails,
 ) -> Result<WebSocketConnectResult, ExecError> {
     let elapsed = started.elapsed();
+    let transcript = store_transcript(
+        plan,
+        store,
+        &Transcript::default(),
+        &[],
+        outcome.clone(),
+        cause,
+        exit,
+    )?;
     let observation = WebSocketObservation {
         protocol: PROTOCOL.into(),
         kind: "websocket-observation".into(),
@@ -1837,7 +2230,7 @@ fn failed_observation(
         negotiated_subprotocol: details.subprotocol,
         handshake_latency_ms: Some(elapsed.as_secs_f64() * 1_000.0),
         session_duration_ms: Some(elapsed.as_secs_f64() * 1_000.0),
-        transcript: None,
+        transcript: Some(transcript.handle),
         handshake: details.handshake,
         trace: details.trace,
         close: None,
@@ -2114,6 +2507,22 @@ mod tests {
         ));
         let store = EvidenceStore::open(&root).unwrap();
         (root, store)
+    }
+
+    fn assert_files_absent(root: &std::path::Path, needle: &[u8]) {
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                assert_files_absent(&path, needle);
+            } else {
+                let data = fs::read(&path).unwrap();
+                assert!(
+                    !data.windows(needle.len()).any(|window| window == needle),
+                    "secret bytes persisted in {}",
+                    path.display()
+                );
+            }
+        }
     }
 
     fn plan(target: String, cidr_grant: String) -> WebSocketPlan {
@@ -2500,6 +2909,26 @@ mod tests {
             assert!(!text.contains("top-secret-value"));
             assert!(!text.contains("Bearer top-secret-value"));
         }
+        assert_eq!(
+            store
+                .explain(
+                    &connection.metadata.trace,
+                    Some("header:request:authorization"),
+                )
+                .unwrap()
+                .value,
+            Some(Value::String("[REDACTED]".into()))
+        );
+        assert_eq!(
+            store
+                .explain(
+                    &connection.metadata.handshake,
+                    Some("header:response:x-reflected"),
+                )
+                .unwrap()
+                .value,
+            Some(Value::String("[REDACTED]".into()))
+        );
         drop(connection);
         server.join().unwrap();
         drop(store);
@@ -2815,6 +3244,27 @@ mod tests {
         assert_eq!(observation.counters.outbound_frames, 4);
         assert_eq!(observation.counters.inbound_messages, 2);
         assert_eq!(observation.counters.outbound_messages, 2);
+        let transcript_handle = observation
+            .transcript
+            .as_deref()
+            .expect("completed sessions reference transcript evidence");
+        let transcript: Value =
+            serde_json::from_slice(&store.get(transcript_handle).unwrap().data).unwrap();
+        let entries = transcript["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 8);
+        assert!(entries.iter().enumerate().all(|(sequence, entry)| {
+            entry["sequence"] == sequence && entry["payload"].as_str().is_some()
+        }));
+        assert_eq!(entries[1]["action_index"], 1);
+        assert_eq!(entries[1]["check"], "matched");
+        assert_eq!(entries[5]["kind"], "pong");
+        assert_eq!(entries[5]["check"], "matched");
+        for (index, expected) in [(2, &[0_u8, 1][..]), (3, &[2_u8, 3][..])] {
+            let handle = entries[index]["payload"].as_str().unwrap();
+            let record = store.get(handle).unwrap();
+            assert_eq!(record.envelope.media_type, "application/octet-stream");
+            assert_eq!(record.data, expected);
+        }
         assert_eq!(
             observation.close,
             Some(WebSocketCloseObservation {
@@ -2885,6 +3335,172 @@ mod tests {
         assert_eq!(observation.counters.inbound_bytes, 16);
         assert_eq!(observation.counters.outbound_bytes, 11);
         assert_eq!(observation.close.unwrap().reason, "finished");
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fragmented_transcript_payloads_are_redacted_before_stable_persistence() {
+        const SECRET: &str = "split-secret-value";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.redact_response_json_pointers = vec!["/private".into()];
+        plan.actions = vec![
+            WebSocketAction::ExpectJson {
+                pointer: Some("/ok".into()),
+                equals: Some(Value::Bool(true)),
+                schema: None,
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: None,
+            },
+        ];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            socket
+                .write(Message::Frame(Frame::message(
+                    br#"{"token":"split-"#.to_vec(),
+                    OpCode::Data(Data::Text),
+                    false,
+                )))
+                .unwrap();
+            socket
+                .write(Message::Ping(b"audit".to_vec().into()))
+                .unwrap();
+            socket
+                .write(Message::Frame(Frame::message(
+                    br#"secret-value","private":"keep-out","ok":true}"#.to_vec(),
+                    OpCode::Data(Data::Continue),
+                    true,
+                )))
+                .unwrap();
+            socket
+                .write(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: format!("bye {SECRET}").into(),
+                })))
+                .unwrap();
+            socket.flush().unwrap();
+            assert_eq!(
+                socket.read().unwrap(),
+                Message::Pong(b"audit".to_vec().into())
+            );
+            assert!(matches!(socket.read().unwrap(), Message::Close(Some(_))));
+        });
+        let (root, store) = store();
+        let mut invoke_options = options(&plan);
+        invoke_options
+            .secrets
+            .insert("runtime-profile".into(), SECRET.into());
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &invoke_options, &store).unwrap()
+        else {
+            panic!("execution must return an observation")
+        };
+        assert_eq!(observation.exit, 0);
+        assert_eq!(observation.close.as_ref().unwrap().reason, "bye [REDACTED]");
+        assert!(
+            !serde_json::to_vec(&plan)
+                .unwrap()
+                .windows(SECRET.len())
+                .any(|window| window == SECRET.as_bytes())
+        );
+        assert!(
+            !serde_json::to_vec(&observation)
+                .unwrap()
+                .windows(SECRET.len())
+                .any(|window| window == SECRET.as_bytes())
+        );
+
+        let transcript_handle = observation.transcript.as_deref().unwrap();
+        let transcript_record = store.get(transcript_handle).unwrap();
+        let transcript: Value = serde_json::from_slice(&transcript_record.data).unwrap();
+        let entries = transcript["entries"].as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .enumerate()
+                .all(|(sequence, entry)| entry["sequence"] == sequence)
+        );
+        let message = entries
+            .iter()
+            .find(|entry| entry["kind"] == "text")
+            .unwrap();
+        assert_eq!(message["action_index"], 0);
+        assert_eq!(message["check"], "matched");
+        let message_handle = message["payload"].as_str().unwrap();
+        let message_record = store.get(message_handle).unwrap();
+        assert_eq!(message_record.envelope.media_type, "application/json");
+        let message_json: Value = serde_json::from_slice(&message_record.data).unwrap();
+        assert_eq!(message_json["token"], "[REDACTED]");
+        assert_eq!(message_json["private"], "[REDACTED]");
+        assert_eq!(
+            store.explain(message_handle, Some("/ok")).unwrap().value,
+            Some(Value::Bool(true))
+        );
+        assert!(
+            store
+                .explain(transcript_handle, Some("/entries/0"))
+                .unwrap()
+                .value
+                .is_some()
+        );
+        for handle in entries
+            .iter()
+            .filter_map(|entry| entry["payload"].as_str())
+            .chain(observation.trace.iter().map(String::as_str))
+            .chain(observation.handshake.iter().map(String::as_str))
+        {
+            assert!(
+                !store
+                    .get(handle)
+                    .unwrap()
+                    .data
+                    .windows(SECRET.len())
+                    .any(|window| window == SECRET.as_bytes())
+            );
+        }
+        let stable_transcript = || Transcript {
+            entries: vec![TranscriptEntry {
+                direction: "inbound",
+                kind: "text",
+                bytes: SECRET.len() as u64,
+                action_index: Some(0),
+                check: "matched",
+                code: None,
+                payload_kind: Some(TranscriptPayloadKind::Text),
+                payload: Some(SECRET.as_bytes().to_vec()),
+            }],
+        };
+        let first = stable_transcript();
+        let duplicate = store_transcript(
+            &plan,
+            &store,
+            &first,
+            &[SECRET.as_bytes().to_vec()],
+            Outcome::Passed,
+            WebSocketTerminalCause::Completed,
+            0,
+        )
+        .unwrap();
+        let second = stable_transcript();
+        let duplicate_again = store_transcript(
+            &plan,
+            &store,
+            &second,
+            &[SECRET.as_bytes().to_vec()],
+            Outcome::Passed,
+            WebSocketTerminalCause::Completed,
+            0,
+        )
+        .unwrap();
+        assert_eq!(duplicate.handle, duplicate_again.handle);
+        assert_files_absent(&root, SECRET.as_bytes());
         server.join().unwrap();
         drop(store);
         fs::remove_dir_all(root).unwrap();
