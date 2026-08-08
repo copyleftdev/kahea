@@ -495,6 +495,54 @@ fn arazzo_json_and_yaml_both_inspect_and_plan() {
 }
 
 #[test]
+fn mixed_arazzo_plan_exposes_sealed_websocket_steps_and_exact_aggregate_grants() {
+    let source = fixture("workflows/mixed.arazzo.yaml");
+    let input = fixture("workflows/billing.input.json");
+    let store = scratch("arazzo-websocket");
+    let plan = output_json(&[
+        "plan",
+        source.to_str().unwrap(),
+        "createAndPublishInvoice",
+        "--input",
+        &format!("@{}", input.display()),
+        "--store",
+        store.to_str().unwrap(),
+    ]);
+    assert_eq!(plan["kind"], "workflow-plan");
+    assert!(plan["steps"][0].get("transport").is_none());
+    assert_eq!(plan["steps"][1]["transport"], "websocket");
+    assert_eq!(plan["steps"][1]["websocket_plan"]["kind"], "websocket-plan");
+    assert_eq!(
+        plan["steps"][1]["websocket_bindings"][0]["pointer"],
+        "/actions/0/text"
+    );
+    let grants = plan["required_grants"].as_array().unwrap();
+    for grant in [
+        "http:POST",
+        "net:sandbox.example.test:443",
+        "net:socket.example.test:443",
+        "websocket:connect",
+    ] {
+        assert!(grants.contains(&serde_json::json!(grant)), "{grant}");
+    }
+    assert!(plan["websocket_policy_fingerprint"].as_str().is_some());
+    let mcp_store = scratch("arazzo-websocket-mcp");
+    let mcp = mcp_call(
+        41,
+        "kahea_plan",
+        json!({
+            "source":source,
+            "operation":"createAndPublishInvoice",
+            "input":serde_json::from_slice::<Value>(&std::fs::read(&input).unwrap()).unwrap(),
+            "store":mcp_store
+        }),
+    );
+    assert_eq!(mcp["result"]["structuredContent"], plan);
+    std::fs::remove_dir_all(store).unwrap();
+    std::fs::remove_dir_all(mcp_store).unwrap();
+}
+
+#[test]
 fn canonical_plan_matches_the_cross_platform_golden_bytes() {
     let store = scratch("golden");
     let source = fixture("billing.openapi.yaml");

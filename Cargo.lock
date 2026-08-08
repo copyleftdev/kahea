@@ -1139,6 +1139,7 @@ dependencies = [
 name = "kahea-workflow"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "kahea-core",
  "kahea-evidence",
  "kahea-exec",
@@ -1146,6 +1147,7 @@ dependencies = [
  "kahea-plan",
  "serde_json",
  "thiserror",
+ "tungstenite",
  "url",
 ]
 

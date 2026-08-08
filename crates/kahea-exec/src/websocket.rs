@@ -427,7 +427,10 @@ fn connect_websocket_resolving_cancellable(
             FailureDetails::default(),
         );
     }
-    let total_deadline = deadline(started, plan.limits.total_timeout_ms);
+    let invocation_deadline = started
+        .checked_add(options.timeout)
+        .unwrap_or_else(Instant::now);
+    let total_deadline = deadline(started, plan.limits.total_timeout_ms).min(invocation_deadline);
     let connect_deadline = deadline(started, plan.limits.connect_timeout_ms).min(total_deadline);
     let target =
         Url::parse(&plan.target).map_err(|error| ExecError::InvalidTarget(error.to_string()))?;
@@ -3016,19 +3019,23 @@ mod tests {
 
         let silent_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut silent_plan = ws_plan(&silent_listener);
-        // Leave enough time for a loaded Windows runner to accept localhost; the peer then
-        // remains silent beyond the same bounded handshake deadline.
-        silent_plan.limits.connect_timeout_ms = 500;
+        // The sealed handshake budget is deliberately generous; the stricter invocation budget
+        // must still terminate a silent peer promptly on loaded cross-platform runners.
+        silent_plan.limits.connect_timeout_ms = 2_000;
         silent_plan = silent_plan.seal().unwrap();
         let silent_server = thread::spawn(move || {
             let _stream = accept_test_connection(&silent_listener);
-            thread::sleep(Duration::from_millis(700));
+            thread::sleep(Duration::from_millis(1_200));
         });
+        let mut silent_options = options(&silent_plan);
+        silent_options.timeout = Duration::from_millis(300);
+        let started = Instant::now();
         let WebSocketConnectResult::Observation(observation) =
-            connect_websocket(&silent_plan, &options(&silent_plan), &store).unwrap()
+            connect_websocket(&silent_plan, &silent_options, &store).unwrap()
         else {
             panic!("silent peer must time out")
         };
+        assert!(started.elapsed() < Duration::from_millis(1_000));
         assert_eq!(observation.exit, 3);
         assert!(matches!(
             observation.terminal_cause,
