@@ -3746,10 +3746,11 @@ mod tests {
         ];
         let plan = plan.seal().unwrap();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (server_done_tx, server_done_rx) = mpsc::channel();
         let server = thread::spawn(move || {
             let _socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
             ready_tx.send(()).unwrap();
-            thread::sleep(Duration::from_millis(150));
+            server_done_rx.recv().unwrap();
         });
         let cancellation = WebSocketCancellation::default();
         let trigger = cancellation.clone();
@@ -3765,6 +3766,7 @@ mod tests {
         else {
             panic!("cancellation must return an observation")
         };
+        server_done_tx.send(()).unwrap();
         assert_eq!(observation.exit, 3);
         assert_eq!(
             observation.terminal_cause,
