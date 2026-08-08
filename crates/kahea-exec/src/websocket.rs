@@ -427,10 +427,8 @@ fn connect_websocket_resolving_cancellable(
             FailureDetails::default(),
         );
     }
-    let invocation_deadline = started
-        .checked_add(options.timeout)
-        .unwrap_or_else(Instant::now);
-    let total_deadline = deadline(started, plan.limits.total_timeout_ms).min(invocation_deadline);
+    let total_deadline =
+        bounded_total_deadline(started, plan.limits.total_timeout_ms, options.timeout);
     let connect_deadline = deadline(started, plan.limits.connect_timeout_ms).min(total_deadline);
     let target =
         Url::parse(&plan.target).map_err(|error| ExecError::InvalidTarget(error.to_string()))?;
@@ -2321,6 +2319,19 @@ fn deadline(started: Instant, milliseconds: u64) -> Instant {
         .unwrap_or(started)
 }
 
+fn bounded_total_deadline(
+    started: Instant,
+    plan_total_timeout_ms: u64,
+    invocation_timeout: Duration,
+) -> Instant {
+    let plan_deadline = deadline(started, plan_total_timeout_ms);
+    started
+        .checked_add(invocation_timeout)
+        .map_or(plan_deadline, |invocation_deadline| {
+            plan_deadline.min(invocation_deadline)
+        })
+}
+
 #[derive(Clone, Copy)]
 struct DeadlineState {
     active_deadline: Instant,
@@ -3702,6 +3713,14 @@ mod tests {
         assert!(!expectation_matches_text(&action, "not-json"));
 
         let origin = Instant::now();
+        assert_eq!(
+            bounded_total_deadline(origin, 250, Duration::MAX),
+            deadline(origin, 250)
+        );
+        assert_eq!(
+            bounded_total_deadline(origin, 250, Duration::from_millis(50)),
+            origin + Duration::from_millis(50)
+        );
         assert_eq!(
             select_deadline(
                 origin + Duration::from_millis(30),

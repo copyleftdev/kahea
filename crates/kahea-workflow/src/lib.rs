@@ -711,12 +711,13 @@ fn invoke_websocket_workflow_step(
     evidence: &EvidenceStore,
     workflow_started: Instant,
 ) -> Result<WebSocketStepRun, WorkflowError> {
-    let mut websocket_plan = step.websocket_plan.clone().ok_or_else(|| {
+    let sealed_websocket_plan = step.websocket_plan.as_ref().ok_or_else(|| {
         WorkflowError::Invalid(format!(
             "WebSocket step {:?} has no sealed child plan",
             step.step_id
         ))
     })?;
+    let mut websocket_plan = sealed_websocket_plan.clone();
     if !step.websocket_bindings.is_empty() {
         let mut source = step.source_document.clone();
         for binding in &step.websocket_bindings {
@@ -739,14 +740,13 @@ fn invoke_websocket_workflow_step(
             step: step.step_id.clone(),
             reason: error.to_string(),
         })?;
-        if websocket_plan.operation != step.operation
-            && source.get("operationId").and_then(Value::as_str) != Some(&step.operation)
-        {
-            return Err(WorkflowError::StepPlan {
-                step: step.step_id.clone(),
-                reason: "runtime binding changed the WebSocket operation identity".into(),
-            });
-        }
+        validate_rebuilt_websocket_plan(
+            &step.step_id,
+            &step.operation,
+            &source,
+            sealed_websocket_plan,
+            &websocket_plan,
+        )?;
     }
     store_websocket_plan(store_root, &websocket_plan).map_err(|error| WorkflowError::StepPlan {
         step: step.step_id.clone(),
@@ -783,16 +783,6 @@ fn invoke_websocket_workflow_step(
             }
             Ok(WebSocketConnectResult::Denied(denial)) => {
                 attempts.push(serde_json::to_value(&denial)?);
-                if let Some(action) = unconditional_retry(&step.on_failure)
-                    && retries < retry_limit(action)
-                {
-                    retries += 1;
-                    let delay = retry_delay(action);
-                    if !delay.is_zero() {
-                        sleep_retry_delay(workflow_started, options.timeout, delay)?;
-                    }
-                    continue;
-                }
                 break WebSocketConnectResult::Denied(denial);
             }
             Ok(WebSocketConnectResult::Connected(_)) => {
@@ -856,6 +846,36 @@ fn invoke_websocket_workflow_step(
         outputs,
         exit,
     })
+}
+
+fn validate_rebuilt_websocket_plan(
+    step_id: &str,
+    operation: &str,
+    source: &Value,
+    sealed: &kahea_core::WebSocketPlan,
+    rebuilt: &kahea_core::WebSocketPlan,
+) -> Result<(), WorkflowError> {
+    if rebuilt.operation != operation
+        && source.get("operationId").and_then(Value::as_str) != Some(operation)
+    {
+        return Err(WorkflowError::StepPlan {
+            step: step_id.into(),
+            reason: "runtime binding changed the WebSocket operation identity".into(),
+        });
+    }
+    if rebuilt.risk != sealed.risk {
+        return Err(WorkflowError::StepPlan {
+            step: step_id.into(),
+            reason: "runtime binding changed the sealed WebSocket risk".into(),
+        });
+    }
+    if rebuilt.required_grants != sealed.required_grants {
+        return Err(WorkflowError::StepPlan {
+            step: step_id.into(),
+            reason: "runtime binding changed the sealed WebSocket required capabilities".into(),
+        });
+    }
+    Ok(())
 }
 
 fn remaining_step_timeout(
@@ -951,13 +971,12 @@ fn evaluate_websocket_output(
                 .map_or(Value::Null, |close| Value::String(close.reason.clone())));
         }
         "$websocket.close.initiator" => {
-            return observation
+            return Ok(observation
                 .close
                 .as_ref()
                 .map(serde_json::to_value)
                 .transpose()?
-                .map(|close| close["initiator"].clone())
-                .ok_or_else(|| WorkflowError::Invalid("WebSocket close data is absent".into()));
+                .map_or(Value::Null, |close| close["initiator"].clone()));
         }
         "$websocket.evidence.transcript" => {
             return Ok(observation
@@ -1957,10 +1976,10 @@ fn value_array(value: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tungstenite::Message;
 
     fn temporary_root(label: &str) -> PathBuf {
@@ -1995,7 +2014,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let worker = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_test_connection(&listener);
             let mut socket = tungstenite::accept(stream).unwrap();
             let message = socket.read().unwrap();
             assert_eq!(message.to_text().unwrap(), expected);
@@ -2005,6 +2024,30 @@ mod tests {
             let _ = socket.flush();
         });
         (port, worker)
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        const TEST_IO_TIMEOUT: Duration = Duration::from_secs(5);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + TEST_IO_TIMEOUT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+                    stream.set_write_timeout(Some(TEST_IO_TIMEOUT)).unwrap();
+                    return stream;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test WebSocket peer did not connect within five seconds"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("test WebSocket accept failed: {error}"),
+            }
+        }
     }
 
     #[test]
@@ -2219,8 +2262,68 @@ paths:
             )
         );
 
+        let sealed_websocket_plan = first.steps[1].websocket_plan.as_ref().unwrap();
+        let mut changed_risk = sealed_websocket_plan.clone();
+        changed_risk.risk = RiskClass::Destructive;
+        assert!(
+            validate_rebuilt_websocket_plan(
+                &first.steps[1].step_id,
+                &first.steps[1].operation,
+                &first.steps[1].source_document,
+                sealed_websocket_plan,
+                &changed_risk,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("sealed WebSocket risk")
+        );
+        let mut changed_grants = sealed_websocket_plan.clone();
+        changed_grants
+            .required_grants
+            .push("unexpected:grant".into());
+        assert!(
+            validate_rebuilt_websocket_plan(
+                &first.steps[1].step_id,
+                &first.steps[1].operation,
+                &first.steps[1].source_document,
+                sealed_websocket_plan,
+                &changed_grants,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("required capabilities")
+        );
+
         let root = temporary_root("denial");
         let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let denied_step_options = InvokeOptions {
+            grants: first
+                .required_grants
+                .iter()
+                .filter(|grant| grant.as_str() != "websocket:connect")
+                .cloned()
+                .collect(),
+            timeout: Duration::from_millis(100),
+            ..InvokeOptions::default()
+        };
+        let step_outputs = BTreeMap::from([(
+            "create".into(),
+            BTreeMap::from([("invoice_id".into(), Value::String("invoice-1".into()))]),
+        )]);
+        let denied_step = invoke_websocket_workflow_step(
+            &first.steps[1],
+            &first.input,
+            &step_outputs,
+            &denied_step_options,
+            &configuration,
+            &root,
+            &evidence,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(denied_step.exit, 4);
+        assert_eq!(denied_step.attempts.len(), 1);
+
         let options = InvokeOptions {
             grants: first
                 .required_grants
@@ -2299,6 +2402,55 @@ paths:
             .to_string()
             .contains("unsupported WebSocket workflow output")
         );
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absent_websocket_close_fields_are_null() {
+        let root = temporary_root("absent-close");
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let observation = WebSocketObservation {
+            protocol: PROTOCOL.into(),
+            kind: "websocket-observation".into(),
+            version: VERSION.into(),
+            config_fingerprint: String::new(),
+            policy_fingerprint: String::new(),
+            source_fingerprints: Vec::new(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+            plan: String::new(),
+            outcome: Outcome::Passed,
+            handshake_status: Some(101),
+            negotiated_subprotocol: None,
+            handshake_latency_ms: None,
+            session_duration_ms: None,
+            transcript: None,
+            handshake: None,
+            trace: None,
+            close: None,
+            terminal_cause: kahea_core::WebSocketTerminalCause::Completed,
+            counters: kahea_core::WebSocketCounters::default(),
+            resolved_origin: None,
+            http_version: None,
+            secret_refs: Vec::new(),
+            runtime: String::new(),
+            exit: 0,
+        };
+        for expression in [
+            "$websocket.close.code",
+            "$websocket.close.reason",
+            "$websocket.close.initiator",
+        ] {
+            assert_eq!(
+                evaluate_websocket_output(
+                    &Value::String(expression.into()),
+                    &observation,
+                    &evidence
+                )
+                .unwrap(),
+                Value::Null
+            );
+        }
         drop(evidence);
         fs::remove_dir_all(root).unwrap();
     }
