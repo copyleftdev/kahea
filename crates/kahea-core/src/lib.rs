@@ -195,6 +195,7 @@ impl RequestPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WebSocketLimits {
     pub connect_timeout_ms: u64,
     pub action_timeout_ms: u64,
@@ -212,7 +213,7 @@ pub struct WebSocketLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum WebSocketAction {
     SendText {
         text: String,
@@ -1852,7 +1853,7 @@ mod tests {
         for (name, expected) in [
             (
                 "websocket-plan",
-                "b3:19157e2ee33b733a2211e167e2e2688f5b2897c1bb2bfe61af86088e30db696e",
+                "b3:2210f7f39fe5135f7b9da443018437f153e32c002145de62d1c3954528d92b88",
             ),
             (
                 "websocket-observation",
