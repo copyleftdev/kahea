@@ -24,3 +24,6 @@ kahea-mcp = { path = "../kahea-mcp" }
 kahea-plan = { path = "../kahea-plan" }
 kahea-workflow = { path = "../kahea-workflow" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tungstenite.workspace = true

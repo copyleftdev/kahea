@@ -1010,6 +1010,7 @@ dependencies = [
  "kahea-plan",
  "kahea-workflow",
  "serde_json",
+ "tungstenite",
 ]
 
 [[package]]
