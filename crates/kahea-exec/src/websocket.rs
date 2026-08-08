@@ -348,7 +348,7 @@ fn connect_websocket_resolving_cancellable(
     resolver: &dyn Fn(&str, u16) -> io::Result<Vec<SocketAddr>>,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<WebSocketConnectResult, ExecError> {
-    if !plan.verify_seal()? {
+    if !plan.verify_seal()? || plan.validate().is_err() {
         return Err(ExecError::InvalidSeal);
     }
     if options
@@ -608,6 +608,13 @@ fn execute_connected_websocket(
     let mut terminal = None;
     for action in &plan.actions {
         let action_deadline = action_deadline(&connection, plan, action);
+        let expected_payload = match action {
+            WebSocketAction::ExpectBinary { payload_base64, .. }
+            | WebSocketAction::ExpectPong { payload_base64, .. } => {
+                Some(decode_sealed_base64(payload_base64).map_err(|()| ExecError::InvalidSeal)?)
+            }
+            _ => None,
+        };
         let result = match action {
             WebSocketAction::SendText { text } => send_message(
                 &mut connection,
@@ -665,6 +672,7 @@ fn execute_connected_websocket(
                 plan,
                 &mut counters,
                 expectation,
+                expected_payload.as_deref(),
                 action_deadline,
             ),
         };
@@ -782,6 +790,7 @@ fn read_expectation(
     plan: &WebSocketPlan,
     counters: &mut WebSocketCounters,
     action: &WebSocketAction,
+    expected_payload: Option<&[u8]>,
     phase_deadline: Instant,
 ) -> Result<Option<WebSocketCloseObservation>, SessionTerminal> {
     loop {
@@ -814,13 +823,8 @@ fn read_expectation(
                 sync_wire_counters(connection, counters)?;
             }
             Message::Pong(payload) => {
-                if let WebSocketAction::ExpectPong { payload_base64, .. } = action
-                    && payload.as_ref()
-                        == decode_sealed_base64(payload_base64)
-                            .map_err(|()| {
-                                SessionTerminal::error(WebSocketTerminalCause::ProtocolViolation)
-                            })?
-                            .as_slice()
+                if matches!(action, WebSocketAction::ExpectPong { .. })
+                    && expected_payload.is_some_and(|expected| payload.as_ref() == expected)
                 {
                     return Ok(None);
                 }
@@ -835,13 +839,8 @@ fn read_expectation(
                 };
             }
             Message::Binary(actual) => {
-                return if let WebSocketAction::ExpectBinary { payload_base64, .. } = action
-                    && actual.as_ref()
-                        == decode_sealed_base64(payload_base64)
-                            .map_err(|()| {
-                                SessionTerminal::error(WebSocketTerminalCause::ProtocolViolation)
-                            })?
-                            .as_slice()
+                return if matches!(action, WebSocketAction::ExpectBinary { .. })
+                    && expected_payload.is_some_and(|expected| actual.as_ref() == expected)
                 {
                     Ok(None)
                 } else {
@@ -2060,8 +2059,18 @@ impl Write for DeadlineTcpStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.flush().map_err(normalize_timeout)
+        loop {
+            self.stream.set_write_timeout(Some(self.remaining()?))?;
+            match self.stream.flush().map_err(normalize_timeout) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
+                {
+                    self.remaining()?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -2957,6 +2966,93 @@ mod tests {
         assert_eq!(observation.exit, 1);
         assert_eq!(observation.counters.inbound_frames, 1);
         budget_server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extended_frame_lengths_and_invalid_text_fail_closed() {
+        for (maximum, payload_bytes) in [(125_u64, 126_usize), (65_535, 65_536)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut plan = ws_plan(&listener);
+            plan.limits.max_frame_bytes = maximum;
+            plan.actions = vec![
+                WebSocketAction::ExpectBinary {
+                    payload_base64: "AA==".into(),
+                    timeout_ms: None,
+                },
+                WebSocketAction::ExpectClose {
+                    codes: vec![1000],
+                    reason: None,
+                    timeout_ms: None,
+                },
+            ];
+            let plan = plan.seal().unwrap();
+            let server = thread::spawn(move || {
+                let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+                let mut wire = Vec::new();
+                Frame::message(vec![0_u8; payload_bytes], OpCode::Data(Data::Binary), true)
+                    .format(&mut wire)
+                    .unwrap();
+                let _ = socket.get_mut().write_all(&wire);
+                let _ = socket.get_mut().flush();
+                thread::sleep(Duration::from_millis(50));
+            });
+            let (root, store) = store();
+            let WebSocketConnectResult::Observation(observation) =
+                execute_websocket(&plan, &options(&plan), &store).unwrap()
+            else {
+                panic!("oversized frame must return an observation")
+            };
+            assert_eq!(
+                observation.terminal_cause,
+                WebSocketTerminalCause::BudgetExhausted
+            );
+            assert_eq!(observation.exit, 1);
+            assert_eq!(observation.counters.inbound_frames, 0);
+            server.join().unwrap();
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "valid".into(),
+                timeout_ms: None,
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: None,
+            },
+        ];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            let mut wire = Vec::new();
+            Frame::message(vec![0xff], OpCode::Data(Data::Text), true)
+                .format(&mut wire)
+                .unwrap();
+            socket.get_mut().write_all(&wire).unwrap();
+            socket.get_mut().flush().unwrap();
+            thread::sleep(Duration::from_millis(50));
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("invalid UTF-8 must return an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::ProtocolViolation
+        );
+        assert_eq!(observation.exit, 3);
+        assert_eq!(observation.counters.inbound_frames, 1);
+        assert_eq!(observation.counters.inbound_bytes, 1);
+        server.join().unwrap();
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
