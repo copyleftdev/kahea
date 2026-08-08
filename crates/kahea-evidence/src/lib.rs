@@ -197,10 +197,10 @@ impl EvidenceStore {
                 select_bytes(&record.data, selector, SELECTION_LIMIT)?
             }
             Some(selector) if selector.starts_with("header:") => {
-                select_header(&record.data, selector)?
+                select_header(&record.data, selector, SELECTION_LIMIT)?
             }
             Some(selector) if record.envelope.media_type.contains("json") => {
-                select_json(&record.data, selector)?
+                select_json(&record.data, selector, SELECTION_LIMIT)?
             }
             Some(selector) if record.envelope.media_type.contains("xml") => {
                 select_xml(&record.data, selector)?
@@ -325,6 +325,13 @@ fn collect_handles(value: &Value, pending: &mut Vec<String>) {
                         | "request-derivation"
                         | "observation"
                         | "certificate"
+                        | "transcript"
+                        | "websocket-trace"
+                        | "websocket-handshake"
+                        | "websocket-text"
+                        | "websocket-json"
+                        | "websocket-binary"
+                        | "websocket-control"
                 )
                 && id.len() >= 8
             {
@@ -361,14 +368,14 @@ fn inline_value(record: &EvidenceRecord) -> Result<Option<Value>, EvidenceError>
     })))
 }
 
-fn select_json(data: &[u8], selector: &str) -> Result<Option<Value>, EvidenceError> {
+fn select_json(data: &[u8], selector: &str, limit: usize) -> Result<Option<Value>, EvidenceError> {
     let document: Value = serde_json::from_slice(data)?;
     if selector.starts_with('/') || selector.is_empty() {
-        return document
+        let selected = document
             .pointer(selector)
             .cloned()
-            .map(Some)
             .ok_or(EvidenceError::SelectionNotFound);
+        return selected.and_then(|value| bounded_selection(value, limit));
     }
     if !selector.starts_with('$') {
         return Err(EvidenceError::InvalidSelector(
@@ -384,14 +391,19 @@ fn select_json(data: &[u8], selector: &str) -> Result<Option<Value>, EvidenceErr
     if nodes.len() > 100 {
         return Err(EvidenceError::SelectionTooLarge);
     }
-    Ok(Some(if nodes.len() == 1 {
+    let value = if nodes.len() == 1 {
         nodes[0].clone()
     } else {
         Value::Array(nodes.into_iter().cloned().collect())
-    }))
+    };
+    bounded_selection(value, limit)
 }
 
-fn select_header(data: &[u8], selector: &str) -> Result<Option<Value>, EvidenceError> {
+fn select_header(
+    data: &[u8],
+    selector: &str,
+    limit: usize,
+) -> Result<Option<Value>, EvidenceError> {
     let document: Value = serde_json::from_slice(data)?;
     let spec = selector.trim_start_matches("header:");
     let (side, name) = spec.split_once(':').unwrap_or(("response", spec));
@@ -405,11 +417,19 @@ fn select_header(data: &[u8], selector: &str) -> Result<Option<Value>, EvidenceE
         .and_then(|value| value.get("headers"))
         .and_then(Value::as_object)
         .ok_or(EvidenceError::SelectionNotFound)?;
-    headers
+    let value = headers
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-        .map(|(_, value)| Some(value.clone()))
-        .ok_or(EvidenceError::SelectionNotFound)
+        .map(|(_, value)| value.clone())
+        .ok_or(EvidenceError::SelectionNotFound)?;
+    bounded_selection(value, limit)
+}
+
+fn bounded_selection(value: Value, limit: usize) -> Result<Option<Value>, EvidenceError> {
+    if serde_json::to_vec(&value)?.len() > limit {
+        return Err(EvidenceError::SelectionTooLarge);
+    }
+    Ok(Some(value))
 }
 
 fn select_bytes(data: &[u8], selector: &str, limit: usize) -> Result<Option<Value>, EvidenceError> {
@@ -535,6 +555,44 @@ mod tests {
         );
         let bytes = store.explain(&xml.handle, Some("bytes:0-4")).unwrap();
         assert_eq!(bytes.value.unwrap()["data"], json!("PHJvb3Q="));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selectors_reject_oversized_missing_and_unsupported_access() {
+        let root = std::env::temp_dir().join(format!(
+            "kahea-evidence-selector-limits-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = EvidenceStore::open(&root).unwrap();
+        let json = store
+            .put_json("body", &json!({"large": "x".repeat(64 * 1024)}), true)
+            .unwrap();
+        assert!(matches!(
+            store.explain(&json.handle, Some("/large")),
+            Err(EvidenceError::SelectionTooLarge)
+        ));
+        assert!(matches!(
+            store.explain(&json.handle, Some("/missing")),
+            Err(EvidenceError::SelectionNotFound)
+        ));
+        let binary = store
+            .put_blob("body", "application/octet-stream", &[0, 1, 2], true)
+            .unwrap();
+        assert!(matches!(
+            store.explain(&binary.handle, Some("bytes:3-4")),
+            Err(EvidenceError::SelectionNotFound)
+        ));
+        assert!(matches!(
+            store.explain(&binary.handle, Some("bytes:bad-range")),
+            Err(EvidenceError::InvalidSelector(_))
+        ));
+        assert!(matches!(
+            store.explain(&binary.handle, Some("/not-supported")),
+            Err(EvidenceError::InvalidSelector(_))
+        ));
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
