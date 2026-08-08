@@ -1,0 +1,48 @@
+arazzo: 1.1.0
+info:
+  title: Mixed HTTP and finite WebSocket workflow
+  version: 1.0.0
+sourceDescriptions:
+  - name: billing
+    url: ../billing.openapi.yaml
+    type: openapi
+  - name: events
+    url: events.websocket.json
+    x-kahea-source-kind: websocket-session
+workflows:
+  - workflowId: createAndPublishInvoice
+    inputs:
+      type: object
+      required: [customer_id, amount]
+      properties:
+        customer_id: { type: string }
+        amount: { type: number }
+    steps:
+      - stepId: create
+        operationId: $sourceDescriptions.billing.createInvoice
+        requestBody:
+          payload:
+            customer_id: $inputs.customer_id
+            amount: $inputs.amount
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          invoice_id: $response.body#/id
+      - stepId: publish
+        operationId: $sourceDescriptions.events.publishInvoiceEvent
+        dependsOn: [create]
+        timeout: 10000
+        x-kahea-websocket-bindings:
+          - pointer: /actions/0/text
+            value: $steps.create.outputs.invoice_id
+        outputs:
+          accepted: $websocket.message.1.json#/accepted
+          transcript: $websocket.evidence.transcript
+          close_code: $websocket.close.code
+        onFailure:
+          - name: retrySession
+            type: retry
+            retryLimit: 1
+        onSuccess:
+          - name: complete
+            type: end

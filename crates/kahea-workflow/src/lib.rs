@@ -1,21 +1,62 @@
 //! Arazzo 1.1 workflow planning and controlled ordered execution.
 
+use base64::Engine;
 use kahea_core::{
     OperationIndexEnvelope, OperationSummary, Outcome, PROTOCOL, RiskClass, VERSION,
-    WorkflowObservation, WorkflowParameterBinding, WorkflowPlan, WorkflowStepObservation,
-    WorkflowStepTemplate, default_config_fingerprint, digest, short_handle,
+    WebSocketObservation, WorkflowObservation, WorkflowParameterBinding, WorkflowPlan,
+    WorkflowStepObservation, WorkflowStepTemplate, WorkflowStepTransport, WorkflowWebSocketBinding,
+    default_config_fingerprint, digest, short_handle,
 };
 use kahea_evidence::EvidenceStore;
-use kahea_exec::{InvocationResult, InvokeOptions, invoke};
-use kahea_ingest::{OpenApiSource, load_source, resolve_operation};
-use kahea_plan::{PlanOptions, ProjectConfiguration, build_plan_with_configuration, store_plan};
+use kahea_exec::{
+    InvocationResult, InvokeOptions, WebSocketConnectResult, execute_websocket, invoke,
+};
+use kahea_ingest::{OpenApiSource, load_source, parse_data_document, resolve_operation};
+use kahea_plan::{
+    PlanOptions, ProjectConfiguration, build_plan_with_configuration,
+    build_websocket_plan_with_configuration, is_websocket_session, store_plan,
+    store_websocket_plan,
+};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use thiserror::Error;
 use url::Url;
+
+const WEBSOCKET_SOURCE_EXTENSION: &str = "x-kahea-source-kind";
+const WEBSOCKET_SOURCE_KIND: &str = "websocket-session";
+
+#[derive(Debug)]
+enum WorkflowSource {
+    Http(OpenApiSource),
+    WebSocket {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        document: Value,
+        source_fingerprint: String,
+    },
+}
+
+impl WorkflowSource {
+    fn document(&self) -> &Value {
+        match self {
+            Self::Http(source) => &source.document,
+            Self::WebSocket { document, .. } => document,
+        }
+    }
+
+    fn source_fingerprint(&self) -> &str {
+        match self {
+            Self::Http(source) => &source.source_fingerprint,
+            Self::WebSocket {
+                source_fingerprint, ..
+            } => source_fingerprint,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum WorkflowError {
@@ -181,22 +222,51 @@ pub fn build_workflow_plan(
         step_ids.insert(step_id.to_string());
         let (source_name, selector) = step_operation(step, &sources)?;
         let source = sources.get(&source_name).expect("step source was resolved");
-        let operation = resolve_operation(source, &selector)
-            .map_err(|error| WorkflowError::Source(error.to_string()))?;
-        let effective_risk = configuration
-            .risk
-            .get(&format!("{} {}", operation.method, operation.path))
-            .copied()
-            .unwrap_or(operation.risk);
-        risk = maximum_risk(risk, effective_risk);
-        preview_grants(
-            source,
-            &operation,
-            server.as_deref(),
-            auth.as_deref(),
-            configuration,
-            &mut required_grants,
-        )?;
+        let (transport, websocket_plan) = match source {
+            WorkflowSource::Http(source) => {
+                let operation = resolve_operation(source, &selector)
+                    .map_err(|error| WorkflowError::Source(error.to_string()))?;
+                let effective_risk = configuration
+                    .risk
+                    .get(&format!("{} {}", operation.method, operation.path))
+                    .copied()
+                    .unwrap_or(operation.risk);
+                risk = maximum_risk(risk, effective_risk);
+                preview_grants(
+                    source,
+                    &operation,
+                    server.as_deref(),
+                    auth.as_deref(),
+                    configuration,
+                    &mut required_grants,
+                )?;
+                (WorkflowStepTransport::Http, None)
+            }
+            WorkflowSource::WebSocket { path, bytes, .. } => {
+                let plan = build_websocket_plan_with_configuration(path, bytes, configuration)
+                    .map_err(|error| WorkflowError::StepPlan {
+                        step: step_id.into(),
+                        reason: error.to_string(),
+                    })?;
+                let operation_id = source
+                    .document()
+                    .get("operationId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        WorkflowError::Invalid(format!(
+                            "WebSocket source {source_name:?} has no operationId"
+                        ))
+                    })?;
+                if selector != operation_id && selector != plan.operation {
+                    return Err(WorkflowError::Invalid(format!(
+                        "WebSocket step {step_id:?} selects unknown operation {selector:?}"
+                    )));
+                }
+                risk = maximum_risk(risk, plan.risk);
+                required_grants.extend(plan.required_grants.iter().cloned());
+                (WorkflowStepTransport::WebSocket, Some(plan))
+            }
+        };
         let parameters = step
             .get("parameters")
             .and_then(Value::as_array)
@@ -227,21 +297,57 @@ pub fn build_workflow_plan(
             .get("requestBody")
             .and_then(|body| body.get("payload").or_else(|| body.get("content")))
             .cloned();
-        let outputs = step
+        let websocket_bindings = if transport == WorkflowStepTransport::WebSocket {
+            if !parameters.is_empty() || request_body.is_some() {
+                return Err(WorkflowError::Invalid(format!(
+                    "WebSocket step {step_id:?} uses x-kahea-websocket-bindings, not HTTP parameters or requestBody"
+                )));
+            }
+            parse_websocket_bindings(step, source.document())?
+        } else {
+            if step.get("x-kahea-websocket-bindings").is_some() {
+                return Err(WorkflowError::Invalid(format!(
+                    "HTTP step {step_id:?} cannot declare x-kahea-websocket-bindings"
+                )));
+            }
+            Vec::new()
+        };
+        let outputs: BTreeMap<String, Value> = step
             .get("outputs")
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default()
             .into_iter()
             .collect();
+        if transport == WorkflowStepTransport::WebSocket {
+            for expression in outputs.values() {
+                validate_websocket_output_expression(expression)?;
+            }
+        }
         let success_criteria = value_array(step, "successCriteria");
-        for criterion in &success_criteria {
-            criterion_to_check(criterion)?;
+        if transport == WorkflowStepTransport::WebSocket && !success_criteria.is_empty() {
+            return Err(WorkflowError::Invalid(format!(
+                "WebSocket step {step_id:?} expresses success through its sealed expect actions"
+            )));
+        } else {
+            for criterion in &success_criteria {
+                criterion_to_check(criterion)?;
+            }
         }
         let on_success = value_array(step, "onSuccess");
         let on_failure = value_array(step, "onFailure");
         validate_actions(step_id, &on_success, true)?;
         validate_actions(step_id, &on_failure, false)?;
+        if transport == WorkflowStepTransport::WebSocket
+            && on_success
+                .iter()
+                .chain(&on_failure)
+                .any(|action| !value_array(action, "criteria").is_empty())
+        {
+            return Err(WorkflowError::Invalid(format!(
+                "WebSocket step {step_id:?} supports deterministic retry/end actions without HTTP response criteria"
+            )));
+        }
         let mut deferred = Vec::new();
         collect_runtime_expressions(step, &mut deferred);
         deferred.sort();
@@ -249,8 +355,8 @@ pub fn build_workflow_plan(
         steps.push(WorkflowStepTemplate {
             step_id: step_id.into(),
             source_name,
-            source_document: source.document.clone(),
-            source_fingerprint: source.source_fingerprint.clone(),
+            source_document: source.document().clone(),
+            source_fingerprint: source.source_fingerprint().into(),
             operation: selector,
             parameters,
             request_body,
@@ -261,14 +367,23 @@ pub fn build_workflow_plan(
             on_success,
             on_failure,
             timeout_ms: step.get("timeout").and_then(Value::as_u64),
+            transport,
+            websocket_plan,
+            websocket_bindings,
         });
     }
     let mut source_fingerprints: Vec<_> = sources
         .values()
-        .map(|source| source.source_fingerprint.clone())
+        .map(|source| source.source_fingerprint().to_string())
         .collect();
     source_fingerprints.push(digest(&serde_json::to_vec(document)?));
     source_fingerprints.sort();
+    let websocket_policy_fingerprint = steps
+        .iter()
+        .any(|step| step.transport == WorkflowStepTransport::WebSocket)
+        .then(|| configuration.websocket_policy_fingerprint())
+        .transpose()
+        .map_err(|error| WorkflowError::Invalid(error.to_string()))?;
     WorkflowPlan {
         protocol: PROTOCOL.into(),
         kind: "workflow-plan".into(),
@@ -289,6 +404,7 @@ pub fn build_workflow_plan(
         auth,
         server,
         checks,
+        websocket_policy_fingerprint,
         fingerprint: String::new(),
         exit: 0,
     }
@@ -346,6 +462,16 @@ pub fn invoke_workflow(
             "workflow configuration or policy fingerprint mismatch".into(),
         ));
     }
+    if let Some(expected) = &plan.websocket_policy_fingerprint
+        && configuration
+            .websocket_policy_fingerprint()
+            .map_err(|error| WorkflowError::Invalid(error.to_string()))?
+            != *expected
+    {
+        return Err(WorkflowError::Invalid(
+            "workflow WebSocket policy fingerprint mismatch".into(),
+        ));
+    }
     if let Some(missing) = plan
         .required_grants
         .iter()
@@ -355,7 +481,38 @@ pub fn invoke_workflow(
     }
     let mut observations = Vec::new();
     let mut step_outputs: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
+    let workflow_started = Instant::now();
     for step in &plan.steps {
+        if step.transport == WorkflowStepTransport::WebSocket {
+            let run = invoke_websocket_workflow_step(
+                step,
+                &plan.input,
+                &step_outputs,
+                options,
+                configuration,
+                store_root,
+                evidence,
+                workflow_started,
+            )?;
+            observations.push(WorkflowStepObservation {
+                step_id: step.step_id.clone(),
+                plan: Some(run.plan),
+                attempts: run.attempts,
+                result: run.result,
+            });
+            if run.exit != 0 {
+                return Ok(failed_workflow_observation(plan, observations, run.exit));
+            }
+            step_outputs.insert(step.step_id.clone(), run.outputs);
+            if step
+                .on_success
+                .iter()
+                .any(|action| action.get("type").and_then(Value::as_str) == Some("end"))
+            {
+                break;
+            }
+            continue;
+        }
         let source_bytes = serde_json::to_vec(&step.source_document)?;
         let source = OpenApiSource {
             document: step.source_document.clone(),
@@ -413,11 +570,7 @@ pub fn invoke_workflow(
         let step_options = InvokeOptions {
             grants: options.grants.clone(),
             secrets: options.secrets.clone(),
-            timeout: step
-                .timeout_ms
-                .map(std::time::Duration::from_millis)
-                .map(|timeout| timeout.min(options.timeout))
-                .unwrap_or(options.timeout),
+            timeout: remaining_step_timeout(workflow_started, options.timeout, step.timeout_ms)?,
             max_response_bytes: options.max_response_bytes,
             expected_config_fingerprint: options.expected_config_fingerprint.clone(),
             expected_policy_fingerprint: options.expected_policy_fingerprint.clone(),
@@ -442,7 +595,7 @@ pub fn invoke_workflow(
                         retries += 1;
                         let delay = retry_delay(action);
                         if !delay.is_zero() {
-                            std::thread::sleep(delay);
+                            sleep_retry_delay(workflow_started, options.timeout, delay)?;
                         }
                         continue;
                     }
@@ -461,7 +614,7 @@ pub fn invoke_workflow(
                         retries += 1;
                         let delay = retry_delay(action);
                         if !delay.is_zero() {
-                            std::thread::sleep(delay);
+                            sleep_retry_delay(workflow_started, options.timeout, delay)?;
                         }
                         continue;
                     }
@@ -483,23 +636,11 @@ pub fn invoke_workflow(
             result: result_value,
         });
         if result.exit() != 0 {
-            return Ok(WorkflowObservation {
-                protocol: PROTOCOL.into(),
-                kind: "workflow-observation".into(),
-                version: VERSION.into(),
-                config_fingerprint: plan.config_fingerprint.clone(),
-                policy_fingerprint: plan.policy_fingerprint.clone(),
-                source_fingerprints: plan.source_fingerprints.clone(),
-                workflow_plan: plan.id.clone(),
-                outcome: if result.exit() == 4 {
-                    Outcome::Denied
-                } else {
-                    Outcome::Failed
-                },
-                steps: observations,
-                outputs: BTreeMap::new(),
-                exit: result.exit(),
-            });
+            return Ok(failed_workflow_observation(
+                plan,
+                observations,
+                result.exit(),
+            ));
         }
         let InvocationResult::Observation(observation) = result else {
             unreachable!("nonzero denial returned above")
@@ -551,10 +692,360 @@ pub fn invoke_workflow(
     })
 }
 
+struct WebSocketStepRun {
+    plan: String,
+    attempts: Vec<Value>,
+    result: Value,
+    outputs: BTreeMap<String, Value>,
+    exit: u8,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_websocket_workflow_step(
+    step: &WorkflowStepTemplate,
+    inputs: &Value,
+    step_outputs: &BTreeMap<String, BTreeMap<String, Value>>,
+    options: &InvokeOptions,
+    configuration: &ProjectConfiguration,
+    store_root: &Path,
+    evidence: &EvidenceStore,
+    workflow_started: Instant,
+) -> Result<WebSocketStepRun, WorkflowError> {
+    let mut websocket_plan = step.websocket_plan.clone().ok_or_else(|| {
+        WorkflowError::Invalid(format!(
+            "WebSocket step {:?} has no sealed child plan",
+            step.step_id
+        ))
+    })?;
+    if !step.websocket_bindings.is_empty() {
+        let mut source = step.source_document.clone();
+        for binding in &step.websocket_bindings {
+            let value = materialize(&binding.value, inputs, step_outputs)?;
+            let target = source.pointer_mut(&binding.pointer).ok_or_else(|| {
+                WorkflowError::Invalid(format!(
+                    "WebSocket binding pointer {:?} no longer resolves",
+                    binding.pointer
+                ))
+            })?;
+            *target = value;
+        }
+        let bytes = serde_json::to_vec(&source)?;
+        websocket_plan = build_websocket_plan_with_configuration(
+            Path::new("workflow-websocket-session.json"),
+            &bytes,
+            configuration,
+        )
+        .map_err(|error| WorkflowError::StepPlan {
+            step: step.step_id.clone(),
+            reason: error.to_string(),
+        })?;
+        if websocket_plan.operation != step.operation
+            && source.get("operationId").and_then(Value::as_str) != Some(&step.operation)
+        {
+            return Err(WorkflowError::StepPlan {
+                step: step.step_id.clone(),
+                reason: "runtime binding changed the WebSocket operation identity".into(),
+            });
+        }
+    }
+    store_websocket_plan(store_root, &websocket_plan).map_err(|error| WorkflowError::StepPlan {
+        step: step.step_id.clone(),
+        reason: error.to_string(),
+    })?;
+
+    let mut attempts = Vec::new();
+    let mut retries = 0_u64;
+    let result = loop {
+        let step_options = InvokeOptions {
+            grants: options.grants.clone(),
+            secrets: options.secrets.clone(),
+            timeout: remaining_step_timeout(workflow_started, options.timeout, step.timeout_ms)?,
+            max_response_bytes: options.max_response_bytes,
+            expected_config_fingerprint: Some(websocket_plan.config_fingerprint.clone()),
+            expected_policy_fingerprint: Some(websocket_plan.policy_fingerprint.clone()),
+            additional_root_certificates_pem: options.additional_root_certificates_pem.clone(),
+        };
+        match execute_websocket(&websocket_plan, &step_options, evidence) {
+            Ok(WebSocketConnectResult::Observation(observation)) => {
+                attempts.push(serde_json::to_value(&observation)?);
+                if observation.exit != 0
+                    && let Some(action) = unconditional_retry(&step.on_failure)
+                    && retries < retry_limit(action)
+                {
+                    retries += 1;
+                    let delay = retry_delay(action);
+                    if !delay.is_zero() {
+                        sleep_retry_delay(workflow_started, options.timeout, delay)?;
+                    }
+                    continue;
+                }
+                break WebSocketConnectResult::Observation(observation);
+            }
+            Ok(WebSocketConnectResult::Denied(denial)) => {
+                attempts.push(serde_json::to_value(&denial)?);
+                if let Some(action) = unconditional_retry(&step.on_failure)
+                    && retries < retry_limit(action)
+                {
+                    retries += 1;
+                    let delay = retry_delay(action);
+                    if !delay.is_zero() {
+                        sleep_retry_delay(workflow_started, options.timeout, delay)?;
+                    }
+                    continue;
+                }
+                break WebSocketConnectResult::Denied(denial);
+            }
+            Ok(WebSocketConnectResult::Connected(_)) => {
+                return Err(WorkflowError::StepPlan {
+                    step: step.step_id.clone(),
+                    reason: "WebSocket executor returned a non-terminal connection".into(),
+                });
+            }
+            Err(error) => {
+                attempts.push(serde_json::json!({
+                    "protocol": PROTOCOL,
+                    "kind": "workflow-attempt-error",
+                    "message": error.to_string(),
+                    "exit": 3
+                }));
+                if let Some(action) = unconditional_retry(&step.on_failure)
+                    && retries < retry_limit(action)
+                {
+                    retries += 1;
+                    let delay = retry_delay(action);
+                    if !delay.is_zero() {
+                        sleep_retry_delay(workflow_started, options.timeout, delay)?;
+                    }
+                    continue;
+                }
+                return Err(WorkflowError::StepPlan {
+                    step: step.step_id.clone(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+    };
+    let (result, outputs, exit) = match result {
+        WebSocketConnectResult::Observation(observation) => {
+            let outputs = if observation.exit == 0 {
+                step.outputs
+                    .iter()
+                    .map(|(name, expression)| {
+                        Ok((
+                            name.clone(),
+                            evaluate_websocket_output(expression, &observation, evidence)?,
+                        ))
+                    })
+                    .collect::<Result<_, WorkflowError>>()?
+            } else {
+                BTreeMap::new()
+            };
+            let exit = observation.exit;
+            (serde_json::to_value(observation)?, outputs, exit)
+        }
+        WebSocketConnectResult::Denied(denial) => {
+            let exit = denial.exit;
+            (serde_json::to_value(denial)?, BTreeMap::new(), exit)
+        }
+        WebSocketConnectResult::Connected(_) => unreachable!("handled above"),
+    };
+    Ok(WebSocketStepRun {
+        plan: websocket_plan.id,
+        attempts,
+        result,
+        outputs,
+        exit,
+    })
+}
+
+fn remaining_step_timeout(
+    workflow_started: Instant,
+    workflow_timeout: std::time::Duration,
+    step_timeout_ms: Option<u64>,
+) -> Result<std::time::Duration, WorkflowError> {
+    let remaining = workflow_timeout
+        .checked_sub(workflow_started.elapsed())
+        .ok_or_else(|| WorkflowError::Invalid("workflow timeout budget exhausted".into()))?;
+    if remaining.is_zero() {
+        return Err(WorkflowError::Invalid(
+            "workflow timeout budget exhausted".into(),
+        ));
+    }
+    Ok(step_timeout_ms
+        .map(std::time::Duration::from_millis)
+        .map(|timeout| timeout.min(remaining))
+        .unwrap_or(remaining))
+}
+
+fn sleep_retry_delay(
+    workflow_started: Instant,
+    workflow_timeout: std::time::Duration,
+    delay: std::time::Duration,
+) -> Result<(), WorkflowError> {
+    let remaining = workflow_timeout
+        .checked_sub(workflow_started.elapsed())
+        .ok_or_else(|| WorkflowError::Invalid("workflow timeout budget exhausted".into()))?;
+    if delay >= remaining {
+        return Err(WorkflowError::Invalid(
+            "workflow retry delay exceeds the remaining timeout budget".into(),
+        ));
+    }
+    std::thread::sleep(delay);
+    Ok(())
+}
+
+fn failed_workflow_observation(
+    plan: &WorkflowPlan,
+    steps: Vec<WorkflowStepObservation>,
+    exit: u8,
+) -> WorkflowObservation {
+    WorkflowObservation {
+        protocol: PROTOCOL.into(),
+        kind: "workflow-observation".into(),
+        version: VERSION.into(),
+        config_fingerprint: plan.config_fingerprint.clone(),
+        policy_fingerprint: plan.policy_fingerprint.clone(),
+        source_fingerprints: plan.source_fingerprints.clone(),
+        workflow_plan: plan.id.clone(),
+        outcome: if exit == 4 {
+            Outcome::Denied
+        } else {
+            Outcome::Failed
+        },
+        steps,
+        outputs: BTreeMap::new(),
+        exit,
+    }
+}
+
+fn evaluate_websocket_output(
+    expression: &Value,
+    observation: &WebSocketObservation,
+    evidence: &EvidenceStore,
+) -> Result<Value, WorkflowError> {
+    let Some(expression) = expression.as_str() else {
+        return Ok(expression.clone());
+    };
+    match expression {
+        "$websocket.handshake.status" => {
+            return Ok(observation
+                .handshake_status
+                .map_or(Value::Null, Value::from));
+        }
+        "$websocket.handshake.subprotocol" => {
+            return Ok(observation
+                .negotiated_subprotocol
+                .clone()
+                .map_or(Value::Null, Value::String));
+        }
+        "$websocket.close.code" => {
+            return Ok(observation
+                .close
+                .as_ref()
+                .map_or(Value::Null, |close| Value::from(close.code)));
+        }
+        "$websocket.close.reason" => {
+            return Ok(observation
+                .close
+                .as_ref()
+                .map_or(Value::Null, |close| Value::String(close.reason.clone())));
+        }
+        "$websocket.close.initiator" => {
+            return observation
+                .close
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?
+                .map(|close| close["initiator"].clone())
+                .ok_or_else(|| WorkflowError::Invalid("WebSocket close data is absent".into()));
+        }
+        "$websocket.evidence.transcript" => {
+            return Ok(observation
+                .transcript
+                .clone()
+                .map_or(Value::Null, Value::String));
+        }
+        "$websocket.evidence.handshake" => {
+            return Ok(observation
+                .handshake
+                .clone()
+                .map_or(Value::Null, Value::String));
+        }
+        "$websocket.evidence.trace" => {
+            return Ok(observation.trace.clone().map_or(Value::Null, Value::String));
+        }
+        _ => {}
+    }
+    let rest = expression
+        .strip_prefix("$websocket.message.")
+        .ok_or_else(|| {
+            WorkflowError::Invalid(format!(
+                "unsupported WebSocket workflow output expression {expression:?}"
+            ))
+        })?;
+    let (index, selector) = rest.split_once('.').ok_or_else(|| {
+        WorkflowError::Invalid(format!("invalid WebSocket message selector {expression:?}"))
+    })?;
+    let index = index.parse::<u64>().map_err(|_| {
+        WorkflowError::Invalid(format!("invalid WebSocket action index in {expression:?}"))
+    })?;
+    let transcript_handle = observation
+        .transcript
+        .as_deref()
+        .ok_or_else(|| WorkflowError::Invalid("WebSocket transcript evidence is absent".into()))?;
+    let transcript: Value = serde_json::from_slice(&evidence.get(transcript_handle)?.data)?;
+    let payload_handle = transcript["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry.get("direction").and_then(Value::as_str) == Some("inbound")
+                && entry.get("action_index").and_then(Value::as_u64) == Some(index)
+        })
+        .and_then(|entry| entry.get("payload"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            WorkflowError::Invalid(format!(
+                "WebSocket action {index} has no bounded inbound payload evidence"
+            ))
+        })?;
+    if selector == "evidence" {
+        return Ok(Value::String(payload_handle.into()));
+    }
+    let payload = evidence.get(payload_handle)?.data;
+    if selector == "base64" {
+        return Ok(Value::String(
+            base64::engine::general_purpose::STANDARD.encode(payload),
+        ));
+    }
+    let text = std::str::from_utf8(&payload).map_err(|_| {
+        WorkflowError::Invalid(format!(
+            "WebSocket action {index} payload is not UTF-8; select evidence or base64"
+        ))
+    })?;
+    if selector == "text" {
+        return Ok(Value::String(text.into()));
+    }
+    let json: Value = serde_json::from_str(text).map_err(|_| {
+        WorkflowError::Invalid(format!("WebSocket action {index} payload is not JSON"))
+    })?;
+    if selector == "json" {
+        return Ok(json);
+    }
+    let pointer = selector.strip_prefix("json#").ok_or_else(|| {
+        WorkflowError::Invalid(format!("unsupported WebSocket selector {selector:?}"))
+    })?;
+    json.pointer(pointer).cloned().ok_or_else(|| {
+        WorkflowError::Invalid(format!(
+            "WebSocket message selector {expression:?} did not match"
+        ))
+    })
+}
+
 fn load_sources(
     arazzo_path: &Path,
     document: &Value,
-) -> Result<BTreeMap<String, OpenApiSource>, WorkflowError> {
+) -> Result<BTreeMap<String, WorkflowSource>, WorkflowError> {
     let descriptions = document
         .get("sourceDescriptions")
         .and_then(Value::as_array)
@@ -565,13 +1056,24 @@ fn load_sources(
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| WorkflowError::Invalid("source description requires name".into()))?;
-        if description
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| kind != "openapi")
-        {
+        let source_type = description.get("type").and_then(Value::as_str);
+        let extension_kind = description
+            .get(WEBSOCKET_SOURCE_EXTENSION)
+            .and_then(Value::as_str);
+        if extension_kind.is_some_and(|kind| kind != WEBSOCKET_SOURCE_KIND) {
             return Err(WorkflowError::Invalid(format!(
-                "source {name:?} is not OpenAPI"
+                "source {name:?} has unsupported {WEBSOCKET_SOURCE_EXTENSION} value {extension_kind:?}"
+            )));
+        }
+        let websocket_source = extension_kind == Some(WEBSOCKET_SOURCE_KIND);
+        if websocket_source && source_type.is_some() {
+            return Err(WorkflowError::Invalid(format!(
+                "WebSocket source {name:?} uses {WEBSOCKET_SOURCE_EXTENSION} and must not mislabel the direct session as an Arazzo source type"
+            )));
+        }
+        if !websocket_source && source_type.is_some_and(|kind| kind != "openapi") {
+            return Err(WorkflowError::Invalid(format!(
+                "source {name:?} has unsupported type {source_type:?}"
             )));
         }
         let url = description
@@ -590,16 +1092,99 @@ fn load_sources(
         let bytes = fs::read(&path).map_err(|error| {
             WorkflowError::Source(format!("could not read {}: {error}", path.display()))
         })?;
-        let source =
-            load_source(&path, &bytes).map_err(|error| WorkflowError::Source(error.to_string()))?;
+        let source = if websocket_source {
+            let document = parse_data_document(&path, &bytes)
+                .map_err(|error| WorkflowError::Source(error.to_string()))?;
+            if !is_websocket_session(&document) {
+                return Err(WorkflowError::Invalid(format!(
+                    "source {name:?} must be a websocket-session document"
+                )));
+            }
+            WorkflowSource::WebSocket {
+                path,
+                source_fingerprint: digest(&bytes),
+                bytes,
+                document,
+            }
+        } else {
+            WorkflowSource::Http(
+                load_source(&path, &bytes)
+                    .map_err(|error| WorkflowError::Source(error.to_string()))?,
+            )
+        };
         sources.insert(name.into(), source);
     }
     Ok(sources)
 }
 
+fn parse_websocket_bindings(
+    step: &Value,
+    source: &Value,
+) -> Result<Vec<WorkflowWebSocketBinding>, WorkflowError> {
+    let Some(bindings) = step.get("x-kahea-websocket-bindings") else {
+        return Ok(Vec::new());
+    };
+    let bindings = bindings.as_array().ok_or_else(|| {
+        WorkflowError::Invalid("x-kahea-websocket-bindings must be an array".into())
+    })?;
+    if bindings.len() > 64 {
+        return Err(WorkflowError::Invalid(
+            "a WebSocket workflow step supports at most 64 explicit bindings".into(),
+        ));
+    }
+    let mut pointers = BTreeSet::new();
+    bindings
+        .iter()
+        .map(|binding| {
+            let pointer = binding
+                .get("pointer")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    WorkflowError::Invalid("WebSocket binding requires pointer".into())
+                })?;
+            validate_websocket_binding_pointer(pointer)?;
+            if source.pointer(pointer).is_none() {
+                return Err(WorkflowError::Invalid(format!(
+                    "WebSocket binding pointer {pointer:?} does not select an existing value"
+                )));
+            }
+            if !pointers.insert(pointer.to_string()) {
+                return Err(WorkflowError::Invalid(format!(
+                    "duplicate WebSocket binding pointer {pointer:?}"
+                )));
+            }
+            let value = binding.get("value").cloned().ok_or_else(|| {
+                WorkflowError::Invalid(format!("WebSocket binding {pointer:?} requires a value"))
+            })?;
+            Ok(WorkflowWebSocketBinding {
+                pointer: pointer.into(),
+                value,
+            })
+        })
+        .collect()
+}
+
+fn validate_websocket_binding_pointer(pointer: &str) -> Result<(), WorkflowError> {
+    let segments: Vec<_> = pointer.split('/').collect();
+    let valid_field = segments
+        .get(3)
+        .is_some_and(|field| matches!(*field, "text" | "payload_base64" | "equals" | "reason"));
+    if segments.len() != 4
+        || !segments[0].is_empty()
+        || segments[1] != "actions"
+        || segments[2].parse::<usize>().is_err()
+        || !valid_field
+    {
+        return Err(WorkflowError::Invalid(format!(
+            "WebSocket binding pointer {pointer:?} must select a bounded action payload or expectation field"
+        )));
+    }
+    Ok(())
+}
+
 fn step_operation(
     step: &Value,
-    sources: &BTreeMap<String, OpenApiSource>,
+    sources: &BTreeMap<String, WorkflowSource>,
 ) -> Result<(String, String), WorkflowError> {
     if let Some(expression) = step.get("operationId").and_then(Value::as_str) {
         if let Some(rest) = expression.strip_prefix("$sourceDescriptions.") {
@@ -633,6 +1218,11 @@ fn step_operation(
         let source = sources
             .get(source_name)
             .ok_or_else(|| WorkflowError::Invalid(format!("unknown source {source_name:?}")))?;
+        let WorkflowSource::Http(source) = source else {
+            return Err(WorkflowError::Invalid(format!(
+                "WebSocket step source {source_name:?} must use operationId"
+            )));
+        };
         let operation = source.document.pointer(pointer).ok_or_else(|| {
             WorkflowError::Invalid(format!("operationPath pointer {pointer:?} did not resolve"))
         })?;
@@ -659,7 +1249,8 @@ fn step_operation(
         ));
     }
     Err(WorkflowError::Invalid(
-        "each v1 step must identify an OpenAPI operationId or operationPath".into(),
+        "each v1 step must identify an HTTP or WebSocket operationId, or an HTTP operationPath"
+            .into(),
     ))
 }
 
@@ -982,6 +1573,48 @@ fn evaluate_output(
     Err(WorkflowError::Invalid(format!(
         "unsupported workflow output expression {expression:?}"
     )))
+}
+
+fn validate_websocket_output_expression(expression: &Value) -> Result<(), WorkflowError> {
+    let Some(expression) = expression.as_str() else {
+        return Ok(());
+    };
+    if matches!(
+        expression,
+        "$websocket.handshake.status"
+            | "$websocket.handshake.subprotocol"
+            | "$websocket.close.code"
+            | "$websocket.close.reason"
+            | "$websocket.close.initiator"
+            | "$websocket.evidence.transcript"
+            | "$websocket.evidence.handshake"
+            | "$websocket.evidence.trace"
+    ) {
+        return Ok(());
+    }
+    let Some(rest) = expression.strip_prefix("$websocket.message.") else {
+        return Err(WorkflowError::Invalid(format!(
+            "unsupported WebSocket workflow output expression {expression:?}"
+        )));
+    };
+    let (index, selector) = rest.split_once('.').ok_or_else(|| {
+        WorkflowError::Invalid(format!(
+            "WebSocket message output {expression:?} requires an action index and selector"
+        ))
+    })?;
+    index.parse::<usize>().map_err(|_| {
+        WorkflowError::Invalid(format!(
+            "WebSocket message output {expression:?} has an invalid action index"
+        ))
+    })?;
+    if matches!(selector, "text" | "json" | "evidence" | "base64") || selector.starts_with("json#/")
+    {
+        Ok(())
+    } else {
+        Err(WorkflowError::Invalid(format!(
+            "WebSocket message output {expression:?} has an unsupported selector"
+        )))
+    }
 }
 
 fn parameter_location(
@@ -1328,6 +1961,51 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tungstenite::Message;
+
+    fn temporary_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kahea-workflow-{label}-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn websocket_limits() -> Value {
+        serde_json::json!({
+            "connect_timeout_ms": 2_000,
+            "action_timeout_ms": 2_000,
+            "idle_timeout_ms": 2_000,
+            "close_timeout_ms": 2_000,
+            "total_timeout_ms": 5_000,
+            "max_frame_bytes": 65_536,
+            "max_message_bytes": 65_536,
+            "max_inbound_frames": 16,
+            "max_outbound_frames": 16,
+            "max_inbound_messages": 8,
+            "max_outbound_messages": 8,
+            "max_inbound_bytes": 262_144,
+            "max_outbound_bytes": 262_144
+        })
+    }
+
+    fn spawn_websocket_peer(expected: String, response: Message) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let message = socket.read().unwrap();
+            assert_eq!(message.to_text().unwrap(), expected);
+            socket.send(response).unwrap();
+            let close = socket.read().unwrap();
+            assert!(close.is_close());
+            let _ = socket.flush();
+        });
+        (port, worker)
+    }
 
     #[test]
     fn two_step_workflow_resolves_output_into_a_sealed_subplan() {
@@ -1475,6 +2153,350 @@ paths:
         assert_eq!(observation.steps.len(), 2);
         assert_eq!(observation.steps[0].attempts.len(), 2);
         server.join().unwrap();
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mixed_fixture_seals_exact_grants_risk_bindings_and_policy() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repository.join("fixtures/workflows/mixed.arazzo.yaml");
+        let bytes = fs::read(&path).unwrap();
+        let document = parse_data_document(&path, &bytes).unwrap();
+        let configuration = ProjectConfiguration::default();
+        let first = build_workflow_plan(
+            &path,
+            &document,
+            "createAndPublishInvoice",
+            serde_json::json!({"customer_id":"customer-1","amount":42}),
+            None,
+            None,
+            Vec::new(),
+            &configuration,
+        )
+        .unwrap();
+        let second = build_workflow_plan(
+            &path,
+            &document,
+            "createAndPublishInvoice",
+            serde_json::json!({"customer_id":"customer-1","amount":42}),
+            None,
+            None,
+            Vec::new(),
+            &configuration,
+        )
+        .unwrap();
+        assert_eq!(first.id, second.id);
+        assert!(first.verify_seal().unwrap());
+        assert_eq!(first.risk, RiskClass::Write);
+        assert_eq!(first.steps[0].transport, WorkflowStepTransport::Http);
+        assert_eq!(first.steps[1].transport, WorkflowStepTransport::WebSocket);
+        assert!(first.steps[1].websocket_plan.is_some());
+        assert_eq!(
+            first.steps[1].websocket_bindings[0].pointer,
+            "/actions/0/text"
+        );
+        assert!(
+            first.steps[1]
+                .deferred_bindings
+                .contains(&"$steps.create.outputs.invoice_id".into())
+        );
+        for grant in [
+            "http:POST",
+            "net:sandbox.example.test:443",
+            "net:socket.example.test:443",
+            "websocket:connect",
+        ] {
+            assert!(first.required_grants.contains(&grant.into()), "{grant}");
+        }
+        assert_eq!(
+            first.websocket_policy_fingerprint.as_deref(),
+            Some(
+                configuration
+                    .websocket_policy_fingerprint()
+                    .unwrap()
+                    .as_str()
+            )
+        );
+
+        let root = temporary_root("denial");
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let options = InvokeOptions {
+            grants: first
+                .required_grants
+                .iter()
+                .filter(|grant| grant.as_str() != "websocket:connect")
+                .cloned()
+                .collect(),
+            expected_config_fingerprint: Some(first.config_fingerprint.clone()),
+            expected_policy_fingerprint: Some(first.policy_fingerprint.clone()),
+            ..InvokeOptions::default()
+        };
+        let denial = invoke_workflow(&first, &options, &configuration, &root, &evidence).unwrap();
+        assert_eq!(denial.outcome, Outcome::Denied);
+        assert_eq!(denial.exit, 4);
+        assert_eq!(denial.steps[0].result["required"], "websocket:connect");
+
+        let mut changed_configuration = configuration.clone();
+        changed_configuration
+            .policy
+            .websocket
+            .max_limits
+            .total_timeout_ms -= 1;
+        let exact_options = InvokeOptions {
+            grants: first.required_grants.iter().cloned().collect(),
+            expected_config_fingerprint: Some(first.config_fingerprint.clone()),
+            expected_policy_fingerprint: Some(first.policy_fingerprint.clone()),
+            ..InvokeOptions::default()
+        };
+        assert!(
+            invoke_workflow(
+                &first,
+                &exact_options,
+                &changed_configuration,
+                &root,
+                &evidence
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("WebSocket policy fingerprint mismatch")
+        );
+
+        let mut unsafe_binding = document.clone();
+        unsafe_binding["workflows"][0]["steps"][1]["x-kahea-websocket-bindings"] =
+            serde_json::json!([{"pointer":"/url","value":"$steps.create.outputs.invoice_id"}]);
+        assert!(
+            build_workflow_plan(
+                &path,
+                &unsafe_binding,
+                "createAndPublishInvoice",
+                serde_json::json!({"customer_id":"customer-1","amount":42}),
+                None,
+                None,
+                Vec::new(),
+                &configuration,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("bounded action payload")
+        );
+
+        let mut unbounded_output = document.clone();
+        unbounded_output["workflows"][0]["steps"][1]["outputs"]["unsafe"] =
+            Value::String("$websocket.transcript".into());
+        assert!(
+            build_workflow_plan(
+                &path,
+                &unbounded_output,
+                "createAndPublishInvoice",
+                serde_json::json!({"customer_id":"customer-1","amount":42}),
+                None,
+                None,
+                Vec::new(),
+                &configuration,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported WebSocket workflow output")
+        );
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn http_output_binds_into_websocket_and_extracts_bounded_message_evidence() {
+        let root = temporary_root("http-ws");
+        let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = http_listener.local_addr().unwrap().port();
+        let http_worker = thread::spawn(move || {
+            let (mut stream, _) = http_listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let bytes = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("POST /items "));
+            let body = r#"{"id":"item-17"}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let (websocket_port, websocket_worker) = spawn_websocket_peer(
+            "item-17".into(),
+            Message::Text(r#"{"accepted":true,"id":"event-9"}"#.into()),
+        );
+        fs::write(
+            root.join("api.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "openapi":"3.1.0",
+                "info":{"title":"workflow","version":"1"},
+                "servers":[{"url":format!("http://127.0.0.1:{http_port}")}],
+                "paths":{"/items":{"post":{"operationId":"createItem","responses":{"200":{"description":"ok"}}}}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("events.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "kind":"websocket-session",
+                "version":1,
+                "operationId":"publishEvent",
+                "url":format!("ws://127.0.0.1:{websocket_port}/events"),
+                "risk":"write",
+                "limits":websocket_limits(),
+                "actions":[
+                    {"type":"send-text","text":"pending"},
+                    {"type":"expect-json","pointer":"/accepted","equals":true,"timeout_ms":2_000},
+                    {"type":"close","code":1000,"reason":"done"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let workflow = serde_json::json!({
+            "arazzo":"1.1.0",
+            "info":{"title":"mixed","version":"1"},
+            "sourceDescriptions":[
+                {"name":"api","url":"api.json","type":"openapi"},
+                {"name":"events","url":"events.json","x-kahea-source-kind":WEBSOCKET_SOURCE_KIND}
+            ],
+            "workflows":[{
+                "workflowId":"httpToSocket",
+                "steps":[
+                    {"stepId":"create","operationId":"$sourceDescriptions.api.createItem","outputs":{"id":"$response.body#/id"}},
+                    {
+                        "stepId":"publish",
+                        "operationId":"$sourceDescriptions.events.publishEvent",
+                        "dependsOn":["create"],
+                        "x-kahea-websocket-bindings":[{"pointer":"/actions/0/text","value":"$steps.create.outputs.id"}],
+                        "outputs":{
+                            "event_id":"$websocket.message.1.json#/id",
+                            "payload":"$websocket.message.1.evidence",
+                            "transcript":"$websocket.evidence.transcript",
+                            "close_code":"$websocket.close.code"
+                        }
+                    }
+                ]
+            }]
+        });
+        let configuration = ProjectConfiguration::default();
+        let plan = build_workflow_plan(
+            &root.join("workflow.json"),
+            &workflow,
+            "httpToSocket",
+            serde_json::json!({}),
+            None,
+            None,
+            Vec::new(),
+            &configuration,
+        )
+        .unwrap();
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let options = InvokeOptions {
+            grants: plan.required_grants.iter().cloned().collect(),
+            expected_config_fingerprint: Some(plan.config_fingerprint.clone()),
+            expected_policy_fingerprint: Some(plan.policy_fingerprint.clone()),
+            timeout: std::time::Duration::from_secs(10),
+            ..InvokeOptions::default()
+        };
+        let observation =
+            invoke_workflow(&plan, &options, &configuration, &root, &evidence).unwrap();
+        assert_eq!(observation.outcome, Outcome::Passed);
+        assert_eq!(observation.steps.len(), 2);
+        assert_eq!(observation.outputs["publish.event_id"], "event-9");
+        assert_eq!(observation.outputs["publish.close_code"], 1000);
+        for output in ["publish.payload", "publish.transcript"] {
+            let handle = observation.outputs[output].as_str().unwrap();
+            assert!(handle.contains(':'));
+            assert!(!evidence.get(handle).unwrap().data.is_empty());
+        }
+        http_worker.join().unwrap();
+        websocket_worker.join().unwrap();
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn websocket_output_binds_into_a_second_finite_session() {
+        let root = temporary_root("ws-ws");
+        let (first_port, first_worker) =
+            spawn_websocket_peer("begin".into(), Message::Text("token-42".into()));
+        let (second_port, second_worker) = spawn_websocket_peer(
+            "token-42".into(),
+            Message::Text(r#"{"stored":true}"#.into()),
+        );
+        for (name, operation, port, send, expect) in [
+            ("first", "receiveToken", first_port, "begin", "token-42"),
+            ("second", "storeToken", second_port, "pending", "stored"),
+        ] {
+            let expectation = if name == "first" {
+                serde_json::json!({"type":"expect-text","equals":expect,"timeout_ms":2_000})
+            } else {
+                serde_json::json!({"type":"expect-json","pointer":"/stored","equals":true,"timeout_ms":2_000})
+            };
+            fs::write(
+                root.join(format!("{name}.json")),
+                serde_json::to_vec(&serde_json::json!({
+                    "kind":"websocket-session",
+                    "version":1,
+                    "operationId":operation,
+                    "url":format!("ws://127.0.0.1:{port}/events"),
+                    "risk":"write",
+                    "limits":websocket_limits(),
+                    "actions":[
+                        {"type":"send-text","text":send},
+                        expectation,
+                        {"type":"close","code":1000,"reason":"done"}
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let workflow = serde_json::json!({
+            "arazzo":"1.1.0",
+            "info":{"title":"socket-chain","version":"1"},
+            "sourceDescriptions":[
+                {"name":"first","url":"first.json","x-kahea-source-kind":WEBSOCKET_SOURCE_KIND},
+                {"name":"second","url":"second.json","x-kahea-source-kind":WEBSOCKET_SOURCE_KIND}
+            ],
+            "workflows":[{
+                "workflowId":"socketChain",
+                "steps":[
+                    {"stepId":"receive","operationId":"$sourceDescriptions.first.receiveToken","outputs":{"token":"$websocket.message.1.text"}},
+                    {
+                        "stepId":"store",
+                        "operationId":"$sourceDescriptions.second.storeToken",
+                        "dependsOn":["receive"],
+                        "x-kahea-websocket-bindings":[{"pointer":"/actions/0/text","value":"$steps.receive.outputs.token"}],
+                        "outputs":{"stored":"$websocket.message.1.json#/stored"}
+                    }
+                ]
+            }]
+        });
+        let configuration = ProjectConfiguration::default();
+        let plan = build_workflow_plan(
+            &root.join("workflow.json"),
+            &workflow,
+            "socketChain",
+            serde_json::json!({}),
+            None,
+            None,
+            Vec::new(),
+            &configuration,
+        )
+        .unwrap();
+        let evidence = EvidenceStore::open(root.join("store")).unwrap();
+        let options = InvokeOptions {
+            grants: plan.required_grants.iter().cloned().collect(),
+            expected_config_fingerprint: Some(plan.config_fingerprint.clone()),
+            expected_policy_fingerprint: Some(plan.policy_fingerprint.clone()),
+            timeout: std::time::Duration::from_secs(10),
+            ..InvokeOptions::default()
+        };
+        let observation =
+            invoke_workflow(&plan, &options, &configuration, &root, &evidence).unwrap();
+        assert_eq!(observation.outcome, Outcome::Passed);
+        assert_eq!(observation.outputs["receive.token"], "token-42");
+        assert_eq!(observation.outputs["store.stored"], true);
+        first_worker.join().unwrap();
+        second_worker.join().unwrap();
         drop(evidence);
         fs::remove_dir_all(root).unwrap();
     }

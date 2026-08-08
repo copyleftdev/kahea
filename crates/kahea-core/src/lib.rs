@@ -674,7 +674,7 @@ fn validate_websocket_action(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Passed,
@@ -829,6 +829,27 @@ pub struct WorkflowParameterBinding {
     pub value: Value,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowStepTransport {
+    #[default]
+    Http,
+    #[serde(rename = "websocket")]
+    WebSocket,
+}
+
+impl WorkflowStepTransport {
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Http)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowWebSocketBinding {
+    pub pointer: String,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowStepTemplate {
     pub step_id: String,
@@ -845,6 +866,12 @@ pub struct WorkflowStepTemplate {
     pub on_success: Vec<Value>,
     pub on_failure: Vec<Value>,
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "WorkflowStepTransport::is_http")]
+    pub transport: WorkflowStepTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_plan: Option<WebSocketPlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub websocket_bindings: Vec<WorkflowWebSocketBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -864,6 +891,8 @@ pub struct WorkflowPlan {
     pub auth: Option<String>,
     pub server: Option<String>,
     pub checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_policy_fingerprint: Option<String>,
     pub fingerprint: String,
     pub exit: u8,
 }
@@ -1320,6 +1349,7 @@ mod tests {
             auth: None,
             server: None,
             checks: Vec::new(),
+            websocket_policy_fingerprint: None,
             fingerprint: String::new(),
             exit: 0,
         }

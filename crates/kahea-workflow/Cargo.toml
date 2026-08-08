@@ -10,6 +10,7 @@ description.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 kahea-core = { path = "../kahea-core" }
 kahea-evidence = { path = "../kahea-evidence" }
 kahea-exec = { path = "../kahea-exec" }
@@ -18,3 +19,6 @@ kahea-plan = { path = "../kahea-plan" }
 serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+tungstenite.workspace = true

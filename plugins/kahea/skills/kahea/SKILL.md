@@ -24,6 +24,13 @@ Planning performs no DNS, authentication, or network access. Pass secret profile
 
 For a direct `websocket-session`, target, auth reference, ordered actions, checks, payloads, and budgets come only from the source. Do not pass HTTP `input`, `set`, `server`, `auth`, `content_type`, `checks`, or conformance overrides.
 
+An Arazzo workflow may reference a local finite session with the source-description extension
+`x-kahea-source-kind: websocket-session`.
+Review the workflow's aggregate risk and complete `required_grants`, plus each embedded
+`websocket_plan`, before invocation. Runtime values may enter only the step's explicit
+`x-kahea-websocket-bindings`; never turn a transcript handle or whole transcript into an implicit
+prompt or payload.
+
 ```bash
 kahea plan openapi.yaml op:abc123 \
   --server sandbox \

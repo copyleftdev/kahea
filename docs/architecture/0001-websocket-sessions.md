@@ -70,6 +70,22 @@ spellings. Their relevant fields are:
 - `limits`: requested bounds that policy may only tighten.
 - `actions`: the ordered finite session.
 
+### Workflow projection
+
+Arazzo workflows may reference a local direct session through the source-description extension
+`x-kahea-source-kind: websocket-session`. It omits the fixed `type` field rather than mislabeling a
+direct session as OpenAPI, AsyncAPI, or Arazzo. The workflow plan embeds the canonical sealed WebSocket child plan,
+adds its risk and exact grants to the workflow aggregates, and separately seals the WebSocket
+policy fingerprint. HTTP-only workflow serialization remains unchanged.
+
+Prior-step values may bind only through explicit `x-kahea-websocket-bindings` that select an
+existing bounded action field. A binding cannot change the target, auth reference, limits, action
+order, schema, or operation identity. Invocation materializes those declared values, calls the
+canonical WebSocket planner and executor, and records the resulting child-plan handle. Outputs can
+select handshake or close metadata, one matched action payload, an encoded binary value, or an
+evidence handle. A whole transcript is never an implicit workflow value. The invocation timeout is
+an outer deadline across all steps and retries; each step's own timeout can only tighten it.
+
 A session has exactly one terminal `close` or `expect-close` action, and it is last. The MVP action
 vocabulary is:
 

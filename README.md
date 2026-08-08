@@ -151,7 +151,7 @@ content is untrusted evidence, never agent instruction.
 ## Supported sources
 
 - OpenAPI 3.0, 3.1, and 3.2 in JSON or YAML
-- Arazzo 1.1 workflows referencing local OpenAPI sources
+- Arazzo 1.1 workflows referencing local OpenAPI and finite WebSocket session sources
 - Direct finite WebSocket session JSON/YAML
 - Postman Collection 2.1 JSON
 - Postman Collection 3 directory/YAML format (`*.request.yaml` and `.resources`)
@@ -242,7 +242,26 @@ kahea plan fixtures/workflows/billing.arazzo.yaml createAndReadInvoice \
 kahea invoke workflow-plan:HANDLE --grant ...
 ```
 
-V1 supports ordered OpenAPI steps, `operationId` and `operationPath`, inputs/outputs, prior-step dependencies, runtime bindings, simple/JSONPath/XPath success criteria, bounded retry and end actions, step timeouts, derived sealed subplans, and per-attempt observation trees. AsyncAPI steps, callbacks, human approval nodes, distributed scheduling, nested workflow steps, `goto`, and reusable action components are explicitly rejected or deferred.
+V1 supports ordered HTTP and finite WebSocket steps, prior-step dependencies, bounded runtime
+bindings, aggregate risk and exact grants, bounded retry/end actions, workflow-wide and step timeout
+caps, sealed child plans, and per-attempt observation trees. HTTP sources use `type: openapi`, while
+a direct WebSocket source description uses the specification extension
+`x-kahea-source-kind: websocket-session` (with no misleading Arazzo `type`) and selects the source
+`operationId`. See [`fixtures/workflows/mixed.arazzo.yaml`](fixtures/workflows/mixed.arazzo.yaml).
+
+WebSocket steps bind prior outputs only through `x-kahea-websocket-bindings`. Each binding names an
+existing JSON Pointer under `/actions/N/` and may replace only `text`, `payload_base64`, `equals`,
+or `reason`; targets, authentication, limits, schemas, action order, and operation identity cannot
+change at invocation. WebSocket outputs support handshake and close metadata, a specific matched
+message by action index (`text`, `json`, `json#/pointer`, `base64`, or `evidence`), and evidence
+handles for the transcript, handshake, and trace. Whole transcripts never become implicit inputs.
+Binary data remains an explicit evidence handle or base64 value. Secret profile references flow
+through the sealed child plan without materializing secret values.
+
+HTTP steps additionally support `operationPath`, request inputs, simple/JSONPath/XPath success
+criteria, and response-body outputs. AsyncAPI ingestion, callbacks, human approval nodes,
+distributed scheduling, nested workflow steps, `goto`, and reusable action components remain
+explicitly deferred.
 
 ## Deterministic conformance fuzzing
 
