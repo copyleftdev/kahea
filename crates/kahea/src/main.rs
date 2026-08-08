@@ -535,7 +535,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         exit: 2,
                     },
                 )?),
-                additional_root_certificates: Vec::new(),
+                additional_root_certificates_pem: Vec::new(),
             };
             if stored_plan_kind(&store, &plan).as_deref() == Some("conformance-plan") {
                 let campaign = load_conformance_plan(&store, &plan).map_err(|error| CliError {

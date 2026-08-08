@@ -66,7 +66,9 @@ pub struct InvokeOptions {
     pub max_response_bytes: u64,
     pub expected_config_fingerprint: Option<String>,
     pub expected_policy_fingerprint: Option<String>,
-    pub additional_root_certificates: Vec<Vec<u8>>,
+    /// PEM-encoded root certificate bundles appended for `wss` connections only.
+    /// Each entry may contain multiple PEM blocks; HTTPS requests made by [`invoke`] ignore them.
+    pub additional_root_certificates_pem: Vec<Vec<u8>>,
 }
 
 impl Default for InvokeOptions {
@@ -78,7 +80,7 @@ impl Default for InvokeOptions {
             max_response_bytes: 16 * 1024 * 1024,
             expected_config_fingerprint: None,
             expected_policy_fingerprint: None,
-            additional_root_certificates: Vec::new(),
+            additional_root_certificates_pem: Vec::new(),
         }
     }
 }
