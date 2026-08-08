@@ -3,9 +3,10 @@
 use base64::Engine;
 use kahea_core::{
     FieldDerivation, PROTOCOL, PlannedAuth, PlannedBody, PlannedHeader, RequestPlan, VERSION,
-    default_config_fingerprint, digest,
+    WebSocketAction, WebSocketLimits, WebSocketPlan, default_config_fingerprint, digest,
+    short_handle,
 };
-use kahea_ingest::{OpenApiSource, OperationDefinition};
+use kahea_ingest::{OpenApiSource, OperationDefinition, parse_data_document};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -78,6 +79,8 @@ pub enum PlanError {
     Configuration(String),
     #[error("policy denied planning: {0}")]
     PolicyDenied(String),
+    #[error("invalid WebSocket session source: {0}")]
+    InvalidWebSocketSource(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,6 +142,60 @@ pub struct ConfigurationPolicy {
     pub require_production_write_approval: bool,
     pub sensitive_headers: Vec<String>,
     pub redact_response_json_pointers: Vec<String>,
+    #[serde(skip_serializing_if = "WebSocketPolicy::is_default")]
+    pub websocket: WebSocketPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSocketPolicy {
+    pub allowed_origins: Vec<String>,
+    pub allowed_subprotocols: Vec<String>,
+    pub max_limits: WebSocketPolicyLimits,
+}
+
+impl WebSocketPolicy {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSocketPolicyLimits {
+    pub connect_timeout_ms: u64,
+    pub action_timeout_ms: u64,
+    pub idle_timeout_ms: u64,
+    pub close_timeout_ms: u64,
+    pub total_timeout_ms: u64,
+    pub max_frame_bytes: u64,
+    pub max_message_bytes: u64,
+    pub max_inbound_frames: u64,
+    pub max_outbound_frames: u64,
+    pub max_inbound_messages: u64,
+    pub max_outbound_messages: u64,
+    pub max_inbound_bytes: u64,
+    pub max_outbound_bytes: u64,
+}
+
+impl Default for WebSocketPolicyLimits {
+    fn default() -> Self {
+        Self {
+            connect_timeout_ms: 30_000,
+            action_timeout_ms: 30_000,
+            idle_timeout_ms: 30_000,
+            close_timeout_ms: 10_000,
+            total_timeout_ms: 120_000,
+            max_frame_bytes: 4 * 1024 * 1024,
+            max_message_bytes: 16 * 1024 * 1024,
+            max_inbound_frames: 4_096,
+            max_outbound_frames: 4_096,
+            max_inbound_messages: 2_048,
+            max_outbound_messages: 2_048,
+            max_inbound_bytes: 64 * 1024 * 1024,
+            max_outbound_bytes: 64 * 1024 * 1024,
+        }
+    }
 }
 
 impl Default for ConfigurationPolicy {
@@ -150,6 +207,7 @@ impl Default for ConfigurationPolicy {
             require_production_write_approval: true,
             sensitive_headers: Vec::new(),
             redact_response_json_pointers: Vec::new(),
+            websocket: WebSocketPolicy::default(),
         }
     }
 }
@@ -233,6 +291,42 @@ impl ProjectConfiguration {
         });
         Ok(digest(&serde_json::to_vec(&value)?))
     }
+
+    pub fn websocket_policy_fingerprint(&self) -> Result<String, PlanError> {
+        let value = serde_json::json!({
+            "builtin": "kahea/builtin-websocket-policy/v1",
+            "policy": {
+                "denied_hosts": self.policy.denied_hosts,
+                "allowed_hosts": self.policy.allowed_hosts,
+                "require_production_write_approval": self.policy.require_production_write_approval,
+                "sensitive_headers": self.policy.sensitive_headers,
+                "redact_response_json_pointers": self.policy.redact_response_json_pointers,
+                "websocket": self.policy.websocket,
+            }
+        });
+        Ok(digest(&serde_json::to_vec(&value)?))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebSocketSessionDocument {
+    kind: String,
+    version: u32,
+    operation_id: String,
+    url: String,
+    #[serde(default)]
+    risk: Option<kahea_core::RiskClass>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    subprotocols: Vec<String>,
+    limits: WebSocketLimits,
+    actions: Vec<WebSocketAction>,
 }
 
 fn self_as_value(configuration: &ProjectConfiguration) -> Result<Value, PlanError> {
@@ -271,6 +365,162 @@ pub fn build_plan(
     options: PlanOptions,
 ) -> Result<RequestPlan, PlanError> {
     build_plan_with_configuration(source, operation, options, &ProjectConfiguration::default())
+}
+
+pub fn build_websocket_plan(path: &Path, bytes: &[u8]) -> Result<WebSocketPlan, PlanError> {
+    build_websocket_plan_with_configuration(path, bytes, &ProjectConfiguration::default())
+}
+
+pub fn build_websocket_plan_with_configuration(
+    path: &Path,
+    bytes: &[u8],
+    configuration: &ProjectConfiguration,
+) -> Result<WebSocketPlan, PlanError> {
+    let document = parse_data_document(path, bytes)
+        .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    let mut source: WebSocketSessionDocument = serde_json::from_value(document)
+        .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    if source.kind != "websocket-session" || source.version != 1 {
+        return Err(PlanError::InvalidWebSocketSource(
+            "kind must be websocket-session and version must be 1".into(),
+        ));
+    }
+    if source.operation_id.is_empty()
+        || source.operation_id.len() > 256
+        || source.operation_id.contains(char::is_control)
+    {
+        return Err(PlanError::InvalidWebSocketSource(
+            "operationId must be a non-empty bounded string without control characters".into(),
+        ));
+    }
+
+    let target = websocket_target(&source.url)?;
+    let host = target
+        .host_str()
+        .ok_or_else(|| PlanError::InvalidWebSocketSource("target URL has no host".into()))?;
+    let port = target.port_or_known_default().ok_or_else(|| {
+        PlanError::InvalidWebSocketSource("target URL has no effective port".into())
+    })?;
+    enforce_host_policy(host, configuration)?;
+
+    let origin = source.origin.as_deref().map(normalize_origin).transpose()?;
+    enforce_websocket_origin_policy(origin.as_deref(), configuration)?;
+    enforce_websocket_subprotocol_policy(&source.subprotocols, configuration)?;
+    let headers = websocket_headers(source.headers, configuration)?;
+    let auth_profile = source.auth.or_else(|| configuration.defaults.auth.clone());
+    let (auth, secret_refs) =
+        bind_websocket_configured_auth(auth_profile.as_deref(), configuration)?;
+    let limits = effective_websocket_limits(source.limits, configuration)?;
+    tighten_websocket_action_timeouts(&mut source.actions, limits.action_timeout_ms);
+
+    let risk_key = format!("WEBSOCKET {}", source.operation_id);
+    let sends_data = source.actions.iter().any(|action| {
+        matches!(
+            action,
+            WebSocketAction::SendText { .. } | WebSocketAction::SendBinary { .. }
+        )
+    });
+    let policy_risk = configuration
+        .risk
+        .get(&risk_key)
+        .or_else(|| configuration.risk.get(&source.operation_id))
+        .copied();
+    let risk = policy_risk.unwrap_or(match source.risk {
+        Some(kahea_core::RiskClass::Read | kahea_core::RiskClass::Unknown) if sends_data => {
+            kahea_core::RiskClass::Write
+        }
+        Some(risk) => risk,
+        None if sends_data => kahea_core::RiskClass::Write,
+        None => kahea_core::RiskClass::Unknown,
+    });
+
+    let mut grants = vec![format!("net:{host}:{port}"), "websocket:connect".into()];
+    if target.scheme() == "ws" {
+        grants.push("net-insecure-websocket".into());
+    }
+    if let Ok(address) = host.parse::<IpAddr>()
+        && is_unsafe_address(address)
+    {
+        grants.push(match address {
+            IpAddr::V4(address) => format!("net-cidr:{address}/32"),
+            IpAddr::V6(address) => format!("net-cidr:{address}/128"),
+        });
+    }
+    if risk == kahea_core::RiskClass::Destructive {
+        grants.push("approve:destructive".into());
+    }
+    if configuration.policy.require_production_write_approval
+        && matches!(
+            risk,
+            kahea_core::RiskClass::Write | kahea_core::RiskClass::Destructive
+        )
+        && configuration
+            .servers
+            .values()
+            .any(|server| configured_server_matches_target(server, &target))
+    {
+        grants.push("approve:production-write".into());
+    }
+    if let Some(auth) = &auth {
+        grants.push(format!("secret:{}", auth.profile));
+        if auth.placement == "tls-client-certificate" {
+            grants.push(format!("tls-client-cert:{}", auth.profile));
+        }
+    }
+    grants.sort();
+    grants.dedup();
+
+    validate_redaction_policy(configuration)?;
+    let mut sensitive_headers = vec![
+        "authorization".into(),
+        "cookie".into(),
+        "proxy-authorization".into(),
+        "set-cookie".into(),
+    ];
+    sensitive_headers.extend(configuration.policy.sensitive_headers.iter().cloned());
+
+    let mut handshake_checks = vec!["extensions:none".into(), "status:101".into()];
+    match source.subprotocols.as_slice() {
+        [] => {}
+        [protocol] => handshake_checks.push(format!("subprotocol:{protocol}")),
+        protocols => handshake_checks.push(format!("subprotocol:any({})", protocols.join(","))),
+    }
+
+    let source_fingerprint = digest(bytes);
+    WebSocketPlan {
+        protocol: PROTOCOL.into(),
+        kind: "websocket-plan".into(),
+        version: VERSION.into(),
+        config_fingerprint: configuration.config_fingerprint()?,
+        policy_fingerprint: configuration.websocket_policy_fingerprint()?,
+        source_fingerprints: vec![source_fingerprint.clone()],
+        id: String::new(),
+        operation: short_handle(
+            "op",
+            &[
+                source_fingerprint.as_bytes(),
+                source.operation_id.as_bytes(),
+            ],
+        ),
+        target: target.to_string(),
+        risk,
+        required_grants: grants,
+        secret_refs,
+        headers,
+        auth,
+        origin,
+        subprotocols: source.subprotocols,
+        handshake_checks,
+        limits,
+        actions: source.actions,
+        sensitive_headers,
+        redact_response_json_pointers: configuration.policy.redact_response_json_pointers.clone(),
+        valid: true,
+        fingerprint: String::new(),
+        exit: 0,
+    }
+    .seal()
+    .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))
 }
 
 pub fn build_plan_with_configuration(
@@ -1396,6 +1646,358 @@ fn build_target(server: &str, path: &str) -> Result<Url, PlanError> {
     Ok(url)
 }
 
+fn websocket_target(value: &str) -> Result<Url, PlanError> {
+    if value.len() > 8_192 {
+        return Err(PlanError::InvalidWebSocketSource(
+            "target URL exceeds 8192 bytes".into(),
+        ));
+    }
+    let url = Url::parse(value).map_err(|error| {
+        PlanError::InvalidWebSocketSource(format!("invalid target URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(PlanError::UnsafeTarget(format!(
+            "scheme {} is denied for WebSocket planning",
+            url.scheme()
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PlanError::UnsafeTarget("userinfo in URLs is denied".into()));
+    }
+    if url.fragment().is_some() {
+        return Err(PlanError::UnsafeTarget(
+            "fragments in WebSocket URLs are denied".into(),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(PlanError::InvalidWebSocketSource(
+            "target URL has no host".into(),
+        ));
+    }
+    Ok(url)
+}
+
+fn enforce_host_policy(host: &str, configuration: &ProjectConfiguration) -> Result<(), PlanError> {
+    if configuration
+        .policy
+        .denied_hosts
+        .iter()
+        .any(|denied| denied.eq_ignore_ascii_case(host))
+    {
+        return Err(PlanError::PolicyDenied(format!(
+            "host {host:?} is explicitly denied"
+        )));
+    }
+    if !configuration.policy.allowed_hosts.is_empty()
+        && !configuration
+            .policy
+            .allowed_hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    {
+        return Err(PlanError::PolicyDenied(format!(
+            "host {host:?} is outside the configured allowlist"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_origin(value: &str) -> Result<String, PlanError> {
+    let origin = Url::parse(value).map_err(|error| {
+        PlanError::InvalidWebSocketSource(format!("invalid Origin URL: {error}"))
+    })?;
+    if !matches!(origin.scheme(), "http" | "https")
+        || origin.host_str().is_none()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return Err(PlanError::InvalidWebSocketSource(
+            "Origin must be an http(s) origin without credentials, path, query, or fragment".into(),
+        ));
+    }
+    Ok(origin.origin().ascii_serialization())
+}
+
+fn enforce_websocket_origin_policy(
+    origin: Option<&str>,
+    configuration: &ProjectConfiguration,
+) -> Result<(), PlanError> {
+    let allowed = configuration
+        .policy
+        .websocket
+        .allowed_origins
+        .iter()
+        .map(|configured| {
+            normalize_origin(configured).map_err(|error| {
+                PlanError::Configuration(format!(
+                    "invalid WebSocket origin allowlist entry {configured:?}: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(origin) = origin
+        && !allowed.is_empty()
+        && !allowed.iter().any(|configured| configured == origin)
+    {
+        return Err(PlanError::PolicyDenied(format!(
+            "Origin {origin:?} is outside the configured WebSocket allowlist"
+        )));
+    }
+    Ok(())
+}
+
+fn enforce_websocket_subprotocol_policy(
+    subprotocols: &[String],
+    configuration: &ProjectConfiguration,
+) -> Result<(), PlanError> {
+    let configured = &configuration.policy.websocket.allowed_subprotocols;
+    let mut unique = BTreeSet::new();
+    if configured
+        .iter()
+        .any(|protocol| !valid_websocket_token(protocol) || !unique.insert(protocol))
+    {
+        return Err(PlanError::Configuration(
+            "WebSocket subprotocol allowlist entries must be unique RFC tokens".into(),
+        ));
+    }
+    if !configured.is_empty()
+        && subprotocols
+            .iter()
+            .any(|protocol| !configured.contains(protocol))
+    {
+        return Err(PlanError::PolicyDenied(
+            "one or more requested WebSocket subprotocols are outside the configured allowlist"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_websocket_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn websocket_headers(
+    source: BTreeMap<String, String>,
+    configuration: &ProjectConfiguration,
+) -> Result<Vec<PlannedHeader>, PlanError> {
+    let forbidden = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "host",
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "sec-websocket-extensions",
+        "content-length",
+        "transfer-encoding",
+    ];
+    let mut names = BTreeSet::new();
+    let mut headers = Vec::with_capacity(source.len());
+    for (name, value) in source {
+        let normalized = name.to_ascii_lowercase();
+        if forbidden.contains(&normalized.as_str())
+            || configuration
+                .policy
+                .sensitive_headers
+                .iter()
+                .any(|sensitive| sensitive.eq_ignore_ascii_case(&name))
+        {
+            return Err(PlanError::InvalidWebSocketSource(format!(
+                "header {name:?} must be supplied by the transport or a secret profile"
+            )));
+        }
+        if !names.insert(normalized) {
+            return Err(PlanError::InvalidWebSocketSource(
+                "handshake header names must be unique case-insensitively".into(),
+            ));
+        }
+        headers.push(PlannedHeader { name, value });
+    }
+    Ok(headers)
+}
+
+fn bind_websocket_configured_auth(
+    requested: Option<&str>,
+    configuration: &ProjectConfiguration,
+) -> Result<(Option<PlannedAuth>, Vec<String>), PlanError> {
+    let Some(profile) = requested else {
+        return Ok((None, Vec::new()));
+    };
+    let configured = configuration
+        .auth
+        .get(profile)
+        .ok_or_else(|| PlanError::UnknownSecurityScheme(profile.into()))?;
+    for reference in [
+        configured.token.as_deref(),
+        configured.username.as_deref(),
+        configured.password.as_deref(),
+        configured.client_id.as_deref(),
+        configured.client_secret.as_deref(),
+        configured.refresh_token.as_deref(),
+        configured.certificate.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !reference.starts_with("secret://") {
+            return Err(PlanError::Configuration(format!(
+                "auth profile {profile:?} contains an inline credential; use secret:// references"
+            )));
+        }
+    }
+    let (scheme, kind, placement) = match configured.r#type.as_str() {
+        "bearer" => ("bearer", "http", "header:Authorization:bearer"),
+        "basic" => ("basic", "http", "header:Authorization:basic"),
+        "mtls" => ("mtls", "mutualTLS", "tls-client-certificate"),
+        other => return Err(PlanError::UnsupportedSecurityScheme(other.into())),
+    };
+    Ok((
+        Some(PlannedAuth {
+            scheme: scheme.into(),
+            kind: kind.into(),
+            profile: profile.into(),
+            placement: placement.into(),
+            token_url: None,
+            scopes: Vec::new(),
+        }),
+        vec![format!("secret://{profile}")],
+    ))
+}
+
+fn effective_websocket_limits(
+    requested: WebSocketLimits,
+    configuration: &ProjectConfiguration,
+) -> Result<WebSocketLimits, PlanError> {
+    let maximum = &configuration.policy.websocket.max_limits;
+    let maximum_values = [
+        maximum.connect_timeout_ms,
+        maximum.action_timeout_ms,
+        maximum.idle_timeout_ms,
+        maximum.close_timeout_ms,
+        maximum.total_timeout_ms,
+        maximum.max_frame_bytes,
+        maximum.max_message_bytes,
+        maximum.max_inbound_frames,
+        maximum.max_outbound_frames,
+        maximum.max_inbound_messages,
+        maximum.max_outbound_messages,
+        maximum.max_inbound_bytes,
+        maximum.max_outbound_bytes,
+    ];
+    if maximum_values.contains(&0) {
+        return Err(PlanError::Configuration(
+            "WebSocket policy maxima must all be positive".into(),
+        ));
+    }
+    if maximum.max_message_bytes < maximum.max_frame_bytes
+        || maximum.connect_timeout_ms > maximum.total_timeout_ms
+        || maximum.action_timeout_ms > maximum.total_timeout_ms
+        || maximum.idle_timeout_ms > maximum.total_timeout_ms
+        || maximum.close_timeout_ms > maximum.total_timeout_ms
+    {
+        return Err(PlanError::Configuration(
+            "WebSocket policy maxima contradict their total or frame bounds".into(),
+        ));
+    }
+    Ok(WebSocketLimits {
+        connect_timeout_ms: requested.connect_timeout_ms.min(maximum.connect_timeout_ms),
+        action_timeout_ms: requested.action_timeout_ms.min(maximum.action_timeout_ms),
+        idle_timeout_ms: requested.idle_timeout_ms.min(maximum.idle_timeout_ms),
+        close_timeout_ms: requested.close_timeout_ms.min(maximum.close_timeout_ms),
+        total_timeout_ms: requested.total_timeout_ms.min(maximum.total_timeout_ms),
+        max_frame_bytes: requested.max_frame_bytes.min(maximum.max_frame_bytes),
+        max_message_bytes: requested.max_message_bytes.min(maximum.max_message_bytes),
+        max_inbound_frames: requested.max_inbound_frames.min(maximum.max_inbound_frames),
+        max_outbound_frames: requested
+            .max_outbound_frames
+            .min(maximum.max_outbound_frames),
+        max_inbound_messages: requested
+            .max_inbound_messages
+            .min(maximum.max_inbound_messages),
+        max_outbound_messages: requested
+            .max_outbound_messages
+            .min(maximum.max_outbound_messages),
+        max_inbound_bytes: requested.max_inbound_bytes.min(maximum.max_inbound_bytes),
+        max_outbound_bytes: requested.max_outbound_bytes.min(maximum.max_outbound_bytes),
+    })
+}
+
+fn tighten_websocket_action_timeouts(actions: &mut [WebSocketAction], maximum: u64) {
+    for action in actions {
+        let timeout = match action {
+            WebSocketAction::ExpectText { timeout_ms, .. }
+            | WebSocketAction::ExpectBinary { timeout_ms, .. }
+            | WebSocketAction::ExpectJson { timeout_ms, .. }
+            | WebSocketAction::ExpectPong { timeout_ms, .. }
+            | WebSocketAction::ExpectClose { timeout_ms, .. } => timeout_ms,
+            _ => continue,
+        };
+        if let Some(timeout) = timeout {
+            *timeout = (*timeout).min(maximum);
+        }
+    }
+}
+
+fn configured_server_matches_target(server: &ConfiguredServer, target: &Url) -> bool {
+    if server.classification.as_deref() != Some("production") {
+        return false;
+    }
+    Url::parse(&server.url).is_ok_and(|configured| {
+        configured.scheme() == target.scheme()
+            && configured
+                .host_str()
+                .zip(target.host_str())
+                .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+            && configured.port_or_known_default() == target.port_or_known_default()
+    })
+}
+
+fn validate_redaction_policy(configuration: &ProjectConfiguration) -> Result<(), PlanError> {
+    for pointer in &configuration.policy.redact_response_json_pointers {
+        if !pointer.starts_with('/') || pointer.len() > 2_048 {
+            return Err(PlanError::Configuration(format!(
+                "response redaction pointer {pointer:?} must be a bounded JSON Pointer"
+            )));
+        }
+    }
+    for header in &configuration.policy.sensitive_headers {
+        if header.is_empty() || header.contains(['\r', '\n']) {
+            return Err(PlanError::Configuration(
+                "sensitive header names must be non-empty and contain no line breaks".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn is_unsafe_address(address: IpAddr) -> bool {
     address.is_loopback()
         || address.is_unspecified()
@@ -1502,6 +2104,33 @@ pub fn load_plan(root: &Path, reference: &str) -> Result<RequestPlan, PlanError>
     Ok(plan)
 }
 
+pub fn store_websocket_plan(root: &Path, plan: &WebSocketPlan) -> Result<PathBuf, PlanError> {
+    if !plan.verify_seal()? {
+        return Err(PlanError::InvalidSeal);
+    }
+    let directory = root.join("store/plans");
+    fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{}.json", plan.id.replace(':', "-")));
+    let temporary = directory.join(format!(".{}.tmp", plan.id.replace(':', "-")));
+    fs::write(&temporary, serde_json::to_vec(plan)?)?;
+    fs::rename(&temporary, &path)?;
+    Ok(path)
+}
+
+pub fn load_websocket_plan(root: &Path, reference: &str) -> Result<WebSocketPlan, PlanError> {
+    let path = if reference.starts_with("plan:") {
+        root.join("store/plans")
+            .join(format!("{}.json", reference.replace(':', "-")))
+    } else {
+        PathBuf::from(reference)
+    };
+    let plan: WebSocketPlan = serde_json::from_slice(&fs::read(path)?)?;
+    if !plan.verify_seal()? {
+        return Err(PlanError::InvalidSeal);
+    }
+    Ok(plan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1538,6 +2167,641 @@ paths:
         let source = load_openapi(Path::new("fixture.yaml"), SPEC.as_bytes()).unwrap();
         let operation = resolve_operation(&source, "updateInvoice").unwrap();
         (source, operation)
+    }
+
+    fn websocket_source() -> Value {
+        serde_json::from_slice(include_bytes!("../../../fixtures/websocket/session.json")).unwrap()
+    }
+
+    fn websocket_configuration() -> ProjectConfiguration {
+        let mut configuration = ProjectConfiguration {
+            version: 1,
+            ..ProjectConfiguration::default()
+        };
+        configuration
+            .policy
+            .allowed_hosts
+            .push("socket.example.test".into());
+        configuration.auth.insert(
+            "chat-sandbox".into(),
+            ConfiguredAuth {
+                r#type: "bearer".into(),
+                token: Some("secret://chat/sandbox".into()),
+                ..ConfiguredAuth::default()
+            },
+        );
+        configuration
+    }
+
+    fn websocket_plan_from_value(
+        value: &Value,
+        configuration: &ProjectConfiguration,
+    ) -> Result<WebSocketPlan, PlanError> {
+        build_websocket_plan_with_configuration(
+            Path::new("session.json"),
+            &serde_json::to_vec(value).unwrap(),
+            configuration,
+        )
+    }
+
+    #[test]
+    fn websocket_fixture_plans_deterministically_with_exact_grants() {
+        let source = websocket_source();
+        let configuration = websocket_configuration();
+        let first = websocket_plan_from_value(&source, &configuration).unwrap();
+        let second = websocket_plan_from_value(&source, &configuration).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap()
+        );
+        assert!(first.verify_seal().unwrap());
+        assert_eq!(
+            first.fingerprint,
+            "b3:0d7e9d6f78000a79e8ab5d22f618e40f60d1d0f66ea47e1b03e7aba02fed8e42"
+        );
+        assert_eq!(first.target, "wss://socket.example.test/v1/events");
+        assert_eq!(first.risk, kahea_core::RiskClass::Write);
+        assert_eq!(
+            first.required_grants,
+            [
+                "net:socket.example.test:443",
+                "secret:chat-sandbox",
+                "websocket:connect",
+            ]
+        );
+        assert_eq!(first.secret_refs, ["secret://chat-sandbox"]);
+        assert_eq!(first.auth.as_ref().unwrap().profile, "chat-sandbox");
+        assert_eq!(
+            first.handshake_checks,
+            [
+                "extensions:none",
+                "status:101",
+                "subprotocol:kahea.events.v1"
+            ]
+        );
+        assert_eq!(
+            first.sensitive_headers,
+            [
+                "authorization",
+                "cookie",
+                "proxy-authorization",
+                "set-cookie"
+            ]
+        );
+        let serialized = serde_json::to_string(&first).unwrap();
+        assert!(!serialized.contains("secret://chat/sandbox"));
+    }
+
+    #[test]
+    fn websocket_json_and_yaml_sources_share_the_same_contract() {
+        let fixture = include_bytes!("../../../fixtures/websocket/session.yaml");
+        let fixture_plan = build_websocket_plan_with_configuration(
+            Path::new("session.yaml"),
+            fixture,
+            &websocket_configuration(),
+        )
+        .unwrap();
+        assert!(fixture_plan.verify_seal().unwrap());
+        assert_eq!(fixture_plan.target, "wss://socket.example.test/v1/events");
+        assert_eq!(fixture_plan.actions.len(), 5);
+
+        let yaml = r#"
+kind: websocket-session
+version: 1
+operationId: receiveReady
+url: wss://socket.example.test/ready
+limits:
+  connect_timeout_ms: 1000
+  action_timeout_ms: 1000
+  idle_timeout_ms: 1000
+  close_timeout_ms: 1000
+  total_timeout_ms: 5000
+  max_frame_bytes: 1024
+  max_message_bytes: 2048
+  max_inbound_frames: 4
+  max_outbound_frames: 4
+  max_inbound_messages: 2
+  max_outbound_messages: 2
+  max_inbound_bytes: 4096
+  max_outbound_bytes: 4096
+actions:
+  - type: expect-close
+    codes: [1000]
+"#;
+        let plan = build_websocket_plan(Path::new("session.yaml"), yaml.as_bytes()).unwrap();
+        assert!(plan.verify_seal().unwrap());
+        assert_eq!(plan.risk, kahea_core::RiskClass::Unknown);
+        assert_eq!(
+            plan.required_grants,
+            ["net:socket.example.test:443", "websocket:connect"]
+        );
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [WebSocketAction::ExpectClose { codes, .. }] if codes == &[1000]
+        ));
+    }
+
+    #[test]
+    fn websocket_policy_tightens_limits_and_has_separate_fingerprints() {
+        let source = websocket_source();
+        let mut configuration = websocket_configuration();
+        let http_policy = configuration.policy_fingerprint().unwrap();
+        let websocket_policy = configuration.websocket_policy_fingerprint().unwrap();
+        let config = configuration.config_fingerprint().unwrap();
+        configuration
+            .policy
+            .websocket
+            .allowed_subprotocols
+            .push("kahea.events.v1".into());
+        configuration.policy.websocket.max_limits.action_timeout_ms = 1_000;
+
+        assert_eq!(http_policy, configuration.policy_fingerprint().unwrap());
+        assert_ne!(
+            websocket_policy,
+            configuration.websocket_policy_fingerprint().unwrap()
+        );
+        assert_ne!(config, configuration.config_fingerprint().unwrap());
+
+        let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+        assert_eq!(plan.limits.action_timeout_ms, 1_000);
+        for action in &plan.actions {
+            match action {
+                WebSocketAction::ExpectJson { timeout_ms, .. }
+                | WebSocketAction::ExpectPong { timeout_ms, .. } => {
+                    assert_eq!(*timeout_ms, Some(1_000));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn websocket_source_validation_fails_closed() {
+        let configuration = websocket_configuration();
+        let mut cases = Vec::new();
+
+        let mut source = websocket_source();
+        source["kind"] = json!("websocket");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["version"] = json!(2);
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["url"] = json!("https://socket.example.test/events");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["url"] = json!("wss://user:password@socket.example.test/events");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["url"] = json!("wss://user@socket.example.test/events");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["url"] = json!("wss://:password@socket.example.test/events");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["url"] = json!("wss://socket.example.test/events#fragment");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["headers"] = json!({"authorization":"Bearer inline"});
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["headers"] = json!({"X-Mode":"one","x-mode":"two"});
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["headers"] = json!({"X-Mode":"one\r\nInjected: yes"});
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["headers"] = json!({"Host":"attacker.example.test"});
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["origin"] = json!("https://client.example.test/not-an-origin");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["operationId"] = json!("");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["operationId"] = json!("a".repeat(257));
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["operationId"] = json!("bad\noperation");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["limits"]["total_timeout_ms"] = json!(0);
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source.as_object_mut().unwrap().remove("limits");
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["actions"] = json!([{"type":"send-text","text":"never terminal"}]);
+        cases.push(source);
+
+        let mut source = websocket_source();
+        source["unexpected"] = json!(true);
+        cases.push(source);
+
+        for source in cases {
+            assert!(
+                websocket_plan_from_value(&source, &configuration).is_err(),
+                "accepted invalid source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_url_and_origin_boundaries_are_independent() {
+        let configuration = websocket_configuration();
+        let mut source = websocket_source();
+        source["operationId"] = json!("a".repeat(256));
+        assert!(websocket_plan_from_value(&source, &configuration).is_ok());
+
+        let prefix = "wss://socket.example.test/";
+        let mut source = websocket_source();
+        source["url"] = json!(format!("{prefix}{}", "a".repeat(8_192 - prefix.len())));
+        assert!(websocket_plan_from_value(&source, &configuration).is_ok());
+
+        source["url"] = json!(format!("{prefix}{}", "a".repeat(8_193 - prefix.len())));
+        assert!(websocket_plan_from_value(&source, &configuration).is_err());
+
+        for invalid in [
+            "ftp://client.example.test",
+            "https://user@client.example.test",
+            "https://:password@client.example.test",
+            "https://client.example.test/path",
+            "https://client.example.test?query=yes",
+            "https://client.example.test#fragment",
+        ] {
+            let mut source = websocket_source();
+            source["origin"] = json!(invalid);
+            assert!(
+                websocket_plan_from_value(&source, &configuration).is_err(),
+                "accepted invalid Origin {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_host_origin_and_subprotocol_policy_fail_closed() {
+        let source = websocket_source();
+        let mut configuration = websocket_configuration();
+        configuration.policy.denied_hosts = vec!["socket.example.test".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::PolicyDenied(_))
+        ));
+
+        configuration.policy.denied_hosts.clear();
+        configuration.policy.allowed_hosts = vec!["other.example.test".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::PolicyDenied(_))
+        ));
+
+        configuration.policy.allowed_hosts = vec!["socket.example.test".into()];
+        configuration.policy.websocket.allowed_origins = vec!["https://other.example.test".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::PolicyDenied(_))
+        ));
+
+        configuration.policy.websocket.allowed_origins = vec!["https://client.example.test".into()];
+        configuration.policy.websocket.allowed_subprotocols = vec!["other.v1".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::PolicyDenied(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_websocket_policy_configuration_fails_closed() {
+        let mut source = websocket_source();
+        source.as_object_mut().unwrap().remove("origin");
+        source.as_object_mut().unwrap().remove("subprotocols");
+
+        let mut configuration = websocket_configuration();
+        configuration.policy.websocket.allowed_origins = vec!["not-an-origin".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.websocket.allowed_origins.clear();
+        configuration.policy.websocket.allowed_subprotocols = vec!["bad protocol".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.websocket.allowed_subprotocols =
+            vec!["chat.v1".into(), "chat.v1".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.websocket.allowed_subprotocols.clear();
+        configuration.policy.websocket.max_limits.max_frame_bytes = 0;
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.websocket.max_limits = WebSocketPolicyLimits::default();
+        configuration.policy.websocket.max_limits.max_message_bytes = 1;
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.websocket.max_limits = WebSocketPolicyLimits::default();
+        configuration.policy.websocket.max_limits.connect_timeout_ms = 120_001;
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        for timeout in ["action", "idle", "close"] {
+            configuration.policy.websocket.max_limits = WebSocketPolicyLimits::default();
+            match timeout {
+                "action" => configuration.policy.websocket.max_limits.action_timeout_ms = 120_001,
+                "idle" => configuration.policy.websocket.max_limits.idle_timeout_ms = 120_001,
+                "close" => configuration.policy.websocket.max_limits.close_timeout_ms = 120_001,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                websocket_plan_from_value(&source, &configuration),
+                Err(PlanError::Configuration(_))
+            ));
+        }
+
+        configuration.policy.websocket.max_limits = WebSocketPolicyLimits::default();
+        configuration.policy.websocket.max_limits.max_message_bytes =
+            configuration.policy.websocket.max_limits.max_frame_bytes;
+        configuration.policy.websocket.max_limits.connect_timeout_ms = 120_000;
+        configuration.policy.websocket.max_limits.action_timeout_ms = 120_000;
+        configuration.policy.websocket.max_limits.idle_timeout_ms = 120_000;
+        configuration.policy.websocket.max_limits.close_timeout_ms = 120_000;
+        assert!(websocket_plan_from_value(&source, &configuration).is_ok());
+    }
+
+    #[test]
+    fn websocket_redaction_policy_boundaries_fail_closed() {
+        let source = websocket_source();
+        let mut configuration = websocket_configuration();
+
+        configuration.policy.redact_response_json_pointers = vec!["not-a-pointer".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.redact_response_json_pointers =
+            vec![format!("/{}", "a".repeat(2_048))];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
+
+        configuration.policy.redact_response_json_pointers =
+            vec![format!("/{}", "a".repeat(2_047))];
+        assert!(websocket_plan_from_value(&source, &configuration).is_ok());
+
+        configuration.policy.redact_response_json_pointers.clear();
+        for invalid in ["", "bad\rheader", "bad\nheader"] {
+            configuration.policy.sensitive_headers = vec![invalid.into()];
+            assert!(matches!(
+                websocket_plan_from_value(&source, &configuration),
+                Err(PlanError::Configuration(_)) | Err(PlanError::InvalidWebSocketSource(_))
+            ));
+        }
+
+        configuration.policy.sensitive_headers = vec!["X-Sensitive".into()];
+        assert!(websocket_plan_from_value(&source, &configuration).is_ok());
+    }
+
+    #[test]
+    fn websocket_sensitive_headers_auth_and_handshake_checks_are_exact() {
+        let source = websocket_source();
+        let mut configuration = websocket_configuration();
+        configuration.policy.sensitive_headers = vec!["X-Client".into()];
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::InvalidWebSocketSource(_))
+        ));
+
+        configuration.policy.sensitive_headers.clear();
+        let mut no_auth = source.clone();
+        no_auth.as_object_mut().unwrap().remove("auth");
+        let plan = websocket_plan_from_value(&no_auth, &configuration).unwrap();
+        assert!(plan.auth.is_none());
+        assert!(plan.secret_refs.is_empty());
+
+        for (kind, scheme, placement, extra_grant) in [
+            ("basic", "basic", "header:Authorization:basic", None),
+            (
+                "mtls",
+                "mtls",
+                "tls-client-certificate",
+                Some("tls-client-cert:chat-sandbox"),
+            ),
+        ] {
+            configuration.auth.get_mut("chat-sandbox").unwrap().r#type = kind.into();
+            let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+            let auth = plan.auth.unwrap();
+            assert_eq!(auth.scheme, scheme);
+            assert_eq!(auth.placement, placement);
+            if let Some(grant) = extra_grant {
+                assert!(plan.required_grants.contains(&grant.into()));
+            }
+        }
+
+        configuration.auth.get_mut("chat-sandbox").unwrap().r#type = "digest".into();
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::UnsupportedSecurityScheme(_))
+        ));
+
+        let mut multiple = source;
+        multiple["subprotocols"] = json!(["kahea.events.v1", "kahea.events.v2"]);
+        let plan = websocket_plan_from_value(&multiple, &websocket_configuration()).unwrap();
+        assert!(
+            plan.handshake_checks
+                .contains(&"subprotocol:any(kahea.events.v1,kahea.events.v2)".into())
+        );
+    }
+
+    #[test]
+    fn websocket_each_expectation_timeout_is_policy_tightened() {
+        let mut source = websocket_source();
+        source["actions"] = json!([
+            {"type":"expect-text","equals":"ready","timeout_ms":2000},
+            {"type":"expect-binary","payload_base64":"AA==","timeout_ms":2000},
+            {"type":"expect-json","equals":{"ready":true},"timeout_ms":2000},
+            {"type":"expect-pong","payload_base64":"","timeout_ms":2000},
+            {"type":"expect-close","codes":[1000],"timeout_ms":2000}
+        ]);
+        let mut configuration = websocket_configuration();
+        configuration.policy.websocket.max_limits.action_timeout_ms = 1_000;
+        let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+        for action in plan.actions {
+            let timeout = match action {
+                WebSocketAction::ExpectText { timeout_ms, .. }
+                | WebSocketAction::ExpectBinary { timeout_ms, .. }
+                | WebSocketAction::ExpectJson { timeout_ms, .. }
+                | WebSocketAction::ExpectPong { timeout_ms, .. }
+                | WebSocketAction::ExpectClose { timeout_ms, .. } => timeout_ms,
+                _ => unreachable!(),
+            };
+            assert_eq!(timeout, Some(1_000));
+        }
+    }
+
+    #[test]
+    fn websocket_plaintext_literal_and_risk_grants_are_exact() {
+        let mut source = websocket_source();
+        source["url"] = json!("ws://127.0.0.1:8080/events");
+        source.as_object_mut().unwrap().remove("auth");
+        source.as_object_mut().unwrap().remove("origin");
+        source.as_object_mut().unwrap().remove("risk");
+
+        let mut configuration = ProjectConfiguration {
+            version: 1,
+            ..ProjectConfiguration::default()
+        };
+        configuration.policy.allowed_hosts = vec!["127.0.0.1".into()];
+        configuration.servers.insert(
+            "production-socket".into(),
+            ConfiguredServer {
+                url: "ws://127.0.0.1:8080".into(),
+                classification: Some("production".into()),
+            },
+        );
+        let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+        assert_eq!(plan.risk, kahea_core::RiskClass::Write);
+        for grant in [
+            "approve:production-write",
+            "net-cidr:127.0.0.1/32",
+            "net-insecure-websocket",
+            "net:127.0.0.1:8080",
+            "websocket:connect",
+        ] {
+            assert!(plan.required_grants.contains(&grant.into()), "{grant}");
+        }
+        assert!(!plan.required_grants.contains(&"approve:destructive".into()));
+
+        source["risk"] = json!("destructive");
+        let destructive = websocket_plan_from_value(&source, &configuration).unwrap();
+        assert!(
+            destructive
+                .required_grants
+                .contains(&"approve:destructive".into())
+        );
+
+        source["risk"] = json!("read");
+        let inferred = websocket_plan_from_value(&source, &configuration).unwrap();
+        assert_eq!(inferred.risk, kahea_core::RiskClass::Write);
+
+        configuration.risk.insert(
+            "WEBSOCKET subscribeBuildEvents".into(),
+            kahea_core::RiskClass::Read,
+        );
+        let overridden = websocket_plan_from_value(&source, &configuration).unwrap();
+        assert_eq!(overridden.risk, kahea_core::RiskClass::Read);
+
+        let mut receive_only = source;
+        receive_only["actions"] = json!([{"type":"expect-close","codes":[1000]}]);
+        receive_only.as_object_mut().unwrap().remove("risk");
+        configuration.risk.clear();
+        let unknown = websocket_plan_from_value(&receive_only, &configuration).unwrap();
+        assert_eq!(unknown.risk, kahea_core::RiskClass::Unknown);
+
+        receive_only["risk"] = json!("read");
+        let declared_read = websocket_plan_from_value(&receive_only, &configuration).unwrap();
+        assert_eq!(declared_read.risk, kahea_core::RiskClass::Read);
+    }
+
+    #[test]
+    fn websocket_production_server_matching_requires_every_component() {
+        let mut source = websocket_source();
+        source["url"] = json!("ws://127.0.0.1:8080/events");
+        source.as_object_mut().unwrap().remove("auth");
+        source.as_object_mut().unwrap().remove("origin");
+
+        for (url, classification) in [
+            ("ws://127.0.0.1:8080", "non-production"),
+            ("wss://127.0.0.1:8080", "production"),
+            ("ws://127.0.0.2:8080", "production"),
+            ("ws://127.0.0.1:8081", "production"),
+            ("not-a-url", "production"),
+        ] {
+            let mut configuration = ProjectConfiguration {
+                version: 1,
+                ..ProjectConfiguration::default()
+            };
+            configuration.policy.allowed_hosts = vec!["127.0.0.1".into()];
+            configuration.servers.insert(
+                "candidate".into(),
+                ConfiguredServer {
+                    url: url.into(),
+                    classification: Some(classification.into()),
+                },
+            );
+            let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+            assert!(
+                !plan
+                    .required_grants
+                    .contains(&"approve:production-write".into()),
+                "incorrectly matched {classification} server {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_auth_references_and_plan_storage_never_embed_credentials() {
+        let source = websocket_source();
+        let mut configuration = websocket_configuration();
+        let plan = websocket_plan_from_value(&source, &configuration).unwrap();
+        let serialized = serde_json::to_string(&plan).unwrap();
+        assert!(!serialized.contains("chat/sandbox"));
+
+        let root =
+            std::env::temp_dir().join(format!("kahea-websocket-plan-store-{}", std::process::id()));
+        let path = store_websocket_plan(&root, &plan).unwrap();
+        assert_eq!(
+            load_websocket_plan(&root, &plan.id).unwrap().fingerprint,
+            plan.fingerprint
+        );
+        let mut tampered: WebSocketPlan =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        tampered.target = "wss://other.example.test".into();
+        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert!(matches!(
+            load_websocket_plan(&root, &plan.id),
+            Err(PlanError::InvalidSeal)
+        ));
+        fs::remove_dir_all(root).unwrap();
+
+        configuration.auth.get_mut("chat-sandbox").unwrap().token = Some("inline-secret".into());
+        assert!(matches!(
+            websocket_plan_from_value(&source, &configuration),
+            Err(PlanError::Configuration(_))
+        ));
     }
 
     #[test]
@@ -1741,6 +3005,18 @@ paths:
         assert_eq!(
             configuration.auth["billing-sandbox"].token.as_deref(),
             Some("secret://billing/sandbox")
+        );
+        assert_eq!(
+            configuration.policy.websocket.allowed_origins,
+            ["https://client.example.test"]
+        );
+        assert_eq!(
+            configuration.policy.websocket.allowed_subprotocols,
+            ["kahea.events.v1"]
+        );
+        assert_eq!(
+            configuration.policy.websocket.max_limits.max_outbound_bytes,
+            67_108_864
         );
 
         let root = std::env::temp_dir().join(format!("kahea-config-{}", std::process::id()));
