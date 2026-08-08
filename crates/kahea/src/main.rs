@@ -8,13 +8,16 @@ use kahea_core::{
     default_config_fingerprint, public_schema, write_envelope,
 };
 use kahea_evidence::EvidenceStore;
-use kahea_exec::{ExecError, InvocationResult, InvokeOptions, invoke};
+use kahea_exec::{
+    ExecError, InvocationResult, InvokeOptions, WebSocketConnectResult, execute_websocket, invoke,
+};
 use kahea_ingest::{
     inspect_source, load_source, parse_data_document, read_source_artifact, resolve_operation,
 };
 use kahea_plan::{
-    PlanOptions, ProjectConfiguration, build_plan_with_configuration, load_plan,
-    parse_explicit_field, store_plan,
+    PlanOptions, ProjectConfiguration, build_plan_with_configuration,
+    build_websocket_plan_with_configuration, inspect_websocket_session, is_websocket_session,
+    load_plan, load_websocket_plan, parse_explicit_field, store_plan, store_websocket_plan,
 };
 use kahea_workflow::{
     build_workflow_plan, inspect_workflows, invoke_workflow, is_arazzo, load_workflow_plan,
@@ -68,7 +71,7 @@ enum Command {
         /// A public k1 envelope name (for example plan, observation, or workflow-plan).
         kind: String,
     },
-    /// Inspect an OpenAPI source without network access.
+    /// Inspect a supported local API, workflow, or WebSocket source without network access.
     Inspect {
         source: PathBuf,
         #[arg(long, value_name = "QUERY")]
@@ -78,7 +81,7 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         cursor: usize,
     },
-    /// Build and seal an exact request plan without network access.
+    /// Build and seal an exact HTTP, workflow, or WebSocket plan without network access.
     Plan {
         source: PathBuf,
         operation: String,
@@ -239,7 +242,14 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
             let bytes = read_source(&source, "source-read-failed")?;
             let parsed = parse_data_document(&source, &bytes).ok();
-            let envelope = if parsed.as_ref().is_some_and(is_arazzo) {
+            let envelope = if parsed.as_ref().is_some_and(is_websocket_session) {
+                inspect_websocket_session(&source, &bytes, r#match.as_deref(), limit, cursor)
+                    .map_err(|error| CliError {
+                        code: "invalid-source",
+                        message: error.to_string(),
+                        exit: 2,
+                    })?
+            } else if parsed.as_ref().is_some_and(is_arazzo) {
                 inspect_workflows(
                     parsed.as_ref().expect("checked"),
                     &bytes,
@@ -312,6 +322,47 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 })?
                 .unwrap_or_default();
             let raw_source = parse_data_document(&source, &source_bytes).ok();
+            if raw_source.as_ref().is_some_and(is_websocket_session) {
+                if input.is_some()
+                    || !explicit.is_empty()
+                    || server.is_some()
+                    || auth.is_some()
+                    || content_type.is_some()
+                    || !checks.is_empty()
+                {
+                    return Err(CliError {
+                        code: "invalid-websocket-plan-options",
+                        message: "WebSocket sessions seal target, auth, actions, checks, and payloads in the source; HTTP plan overrides are not accepted".into(),
+                        exit: 2,
+                    });
+                }
+                let websocket_plan =
+                    build_websocket_plan_with_configuration(&source, &source_bytes, &configuration)
+                        .map_err(|error| CliError {
+                            code: "invalid-websocket-plan",
+                            message: error.to_string(),
+                            exit: 2,
+                        })?;
+                let operation_id = raw_source
+                    .as_ref()
+                    .and_then(|document| document.get("operationId"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if operation != operation_id && operation != websocket_plan.operation {
+                    return Err(CliError {
+                        code: "unknown-operation",
+                        message: format!("WebSocket operation {operation:?} was not found"),
+                        exit: 2,
+                    });
+                }
+                store_websocket_plan(&store, &websocket_plan).map_err(|error| CliError {
+                    code: "plan-store-failed",
+                    message: error.to_string(),
+                    exit: 2,
+                })?;
+                write_envelope(&websocket_plan).map_err(io_error)?;
+                return Ok(0);
+            }
             if raw_source.as_ref().is_some_and(is_arazzo) {
                 if !explicit.is_empty() {
                     return Err(CliError {
@@ -516,6 +567,17 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 message: error.to_string(),
                 exit: 2,
             })?;
+            let plan_kind = stored_plan_kind(&store, &plan);
+            let expected_policy_fingerprint = if plan_kind.as_deref() == Some("websocket-plan") {
+                configuration.websocket_policy_fingerprint()
+            } else {
+                configuration.policy_fingerprint()
+            }
+            .map_err(|error| CliError {
+                code: "invalid-configuration",
+                message: error.to_string(),
+                exit: 2,
+            })?;
             let invoke_options = InvokeOptions {
                 grants: grants.into_iter().collect::<BTreeSet<_>>(),
                 secrets,
@@ -528,16 +590,37 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         exit: 2,
                     },
                 )?),
-                expected_policy_fingerprint: Some(configuration.policy_fingerprint().map_err(
-                    |error| CliError {
-                        code: "invalid-configuration",
-                        message: error.to_string(),
-                        exit: 2,
-                    },
-                )?),
+                expected_policy_fingerprint: Some(expected_policy_fingerprint),
                 additional_root_certificates_pem: Vec::new(),
             };
-            if stored_plan_kind(&store, &plan).as_deref() == Some("conformance-plan") {
+            if plan_kind.as_deref() == Some("websocket-plan") {
+                let websocket_plan =
+                    load_websocket_plan(&store, &plan).map_err(|error| CliError {
+                        code: "invalid-websocket-plan",
+                        message: error.to_string(),
+                        exit: 2,
+                    })?;
+                let result = execute_websocket(&websocket_plan, &invoke_options, &evidence)
+                    .map_err(exec_error)?;
+                let exit = result.exit().unwrap_or(3);
+                match result {
+                    WebSocketConnectResult::Observation(observation) => {
+                        write_envelope(&observation).map_err(io_error)?;
+                    }
+                    WebSocketConnectResult::Denied(denial) => {
+                        write_envelope(&denial).map_err(io_error)?;
+                    }
+                    WebSocketConnectResult::Connected(_) => {
+                        return Err(CliError {
+                            code: "websocket-invocation-failed",
+                            message: "WebSocket executor returned a non-terminal connection".into(),
+                            exit: 3,
+                        });
+                    }
+                }
+                return Ok(exit);
+            }
+            if plan_kind.as_deref() == Some("conformance-plan") {
                 let campaign = load_conformance_plan(&store, &plan).map_err(|error| CliError {
                     code: "invalid-conformance-plan",
                     message: error.to_string(),
@@ -553,7 +636,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 write_envelope(&observation).map_err(io_error)?;
                 return Ok(exit);
             }
-            if stored_plan_kind(&store, &plan).as_deref() == Some("workflow-plan") {
+            if plan_kind.as_deref() == Some("workflow-plan") {
                 let workflow_plan =
                     load_workflow_plan(&store, &plan).map_err(|error| CliError {
                         code: "invalid-workflow-plan",

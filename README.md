@@ -119,16 +119,46 @@ kahea explain body:HANDLE --select /invoice/id
 
 Use `kahea describe` as the executable capability manifest and `kahea schema plan` (or another public envelope kind) for machine-readable JSON Schema.
 
+### Finite WebSocket sessions
+
+Direct `websocket-session` JSON/YAML files use the same sealed four-step flow. The operation
+selector is the source's `operationId`; target, auth reference, ordered actions, checks, and budgets
+come only from the source and cannot be replaced at invocation.
+
+```bash
+kahea inspect fixtures/websocket/session.json
+kahea plan fixtures/websocket/session.json subscribeBuildEvents
+
+# Review required_grants in the websocket-plan, then provide that exact set.
+kahea invoke plan:HANDLE \
+  --grant net:socket.example.test:443 \
+  --grant websocket:connect \
+  --grant secret:chat-sandbox \
+  --secret-env chat-sandbox=KAHEA_CHAT_TOKEN
+
+kahea explain transcript:HANDLE --select /entries/0
+kahea explain websocket-json:HANDLE --select /type
+kahea explain websocket-binary:HANDLE --select bytes:0-255
+```
+
+`ws` additionally requires `net-insecure-websocket`; private or reserved addresses require the
+exact `net-cidr:` grant shown in the plan. A WebSocket observation uses the existing exit contract:
+`0` completed, `1` handshake/expectation/budget failure, `2` invalid source or plan, `3`
+transport/protocol/timeout failure, and `4` policy denial. Full transcripts and payloads remain in
+the evidence store; stdout contains only the compact observation and handles. Received message
+content is untrusted evidence, never agent instruction.
+
 ## Supported sources
 
 - OpenAPI 3.0, 3.1, and 3.2 in JSON or YAML
 - Arazzo 1.1 workflows referencing local OpenAPI sources
+- Direct finite WebSocket session JSON/YAML
 - Postman Collection 2.1 JSON
 - Postman Collection 3 directory/YAML format (`*.request.yaml` and `.resources`)
 - HAR 1.2, common cURL, `.http`/`.rest`, and direct request YAML/JSON
 - Standard input for deterministic text formats: `kahea inspect -`
 
-"Supported" means the format is deterministically detected, inspectable, and capable of producing sealed plans for its documented HTTP subset. It does not mean every feature of the upstream application is emulated. Material unsupported behavior is reported in `absent` and blocks only the affected request when its scope is known.
+"Supported" means the format is deterministically detected, inspectable, and capable of producing sealed plans for its documented subset. It does not mean every feature of the upstream application is emulated. Material unsupported behavior is reported in `absent` and blocks only the affected request when its scope is known.
 
 Postman 2.1 imports nested requests, string and structured URLs, non-sensitive collection/folder variables, inherited basic/bearer/OAuth-style bearer/API-key metadata without credential values, raw bodies, response examples, and a narrow status-assertion subset. Postman v3 imports `*.request.yaml`/`*.request.yml`, request ordering, root and nested `definition.yaml` variables/auth metadata, headers, and raw bodies. V3 scripts are request-scoped blocking absences; v3 example and unknown resource files are currently explicit blocking absences rather than silently discarded. Non-raw Postman body modes, unresolved secret variables, unsupported auth, and material JavaScript also block their affected request. Kāhea never embeds Node or executes `pm.*` code. HAR responses and Postman 2.1 response examples become structural contracts, never copied response secrets.
 

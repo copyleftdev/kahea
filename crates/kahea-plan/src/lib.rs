@@ -2,9 +2,9 @@
 
 use base64::Engine;
 use kahea_core::{
-    FieldDerivation, PROTOCOL, PlannedAuth, PlannedBody, PlannedHeader, RequestPlan, VERSION,
-    WebSocketAction, WebSocketLimits, WebSocketPlan, default_config_fingerprint, digest,
-    short_handle,
+    FieldDerivation, OperationIndexEnvelope, OperationSummary, PROTOCOL, PlannedAuth, PlannedBody,
+    PlannedHeader, RequestPlan, RiskClass, VERSION, WebSocketAction, WebSocketLimits,
+    WebSocketPlan, default_config_fingerprint, digest, short_handle,
 };
 use kahea_ingest::{OpenApiSource, OperationDefinition, parse_data_document};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -308,7 +308,7 @@ impl ProjectConfiguration {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WebSocketSessionDocument {
     kind: String,
@@ -371,15 +371,83 @@ pub fn build_websocket_plan(path: &Path, bytes: &[u8]) -> Result<WebSocketPlan, 
     build_websocket_plan_with_configuration(path, bytes, &ProjectConfiguration::default())
 }
 
-pub fn build_websocket_plan_with_configuration(
+pub fn is_websocket_session(document: &Value) -> bool {
+    document
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "websocket-session")
+}
+
+pub fn inspect_websocket_session(
     path: &Path,
     bytes: &[u8],
-    configuration: &ProjectConfiguration,
-) -> Result<WebSocketPlan, PlanError> {
+    query: Option<&str>,
+    limit: usize,
+    cursor: usize,
+) -> Result<OperationIndexEnvelope, PlanError> {
     let document = parse_data_document(path, bytes)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
-    let mut source: WebSocketSessionDocument = serde_json::from_value(document)
+    let source: WebSocketSessionDocument = serde_json::from_value(document)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    validate_websocket_source_identity(&source)?;
+    let target = websocket_target(&source.url)?;
+    let source_fingerprint = digest(bytes);
+    let operation = short_handle(
+        "op",
+        &[
+            source_fingerprint.as_bytes(),
+            source.operation_id.as_bytes(),
+        ],
+    );
+    let sends_data = source.actions.iter().any(|action| {
+        matches!(
+            action,
+            WebSocketAction::SendText { .. } | WebSocketAction::SendBinary { .. }
+        )
+    });
+    let risk = match source.risk {
+        Some(RiskClass::Read | RiskClass::Unknown) if sends_data => RiskClass::Write,
+        Some(risk) => risk,
+        None if sends_data => RiskClass::Write,
+        None => RiskClass::Unknown,
+    };
+    let query = query.unwrap_or_default().trim().to_ascii_lowercase();
+    let matches = query.is_empty()
+        || operation.to_ascii_lowercase().contains(&query)
+        || source.operation_id.to_ascii_lowercase().contains(&query)
+        || target.as_str().to_ascii_lowercase().contains(&query)
+        || "websocket".contains(&query);
+    let operations = matches.then(|| {
+        OperationSummary(
+            operation,
+            "WEBSOCKET".into(),
+            target.to_string(),
+            source.operation_id,
+            risk,
+        )
+    });
+    let count = usize::from(operations.is_some());
+    if cursor > count {
+        return Err(PlanError::InvalidWebSocketSource(format!(
+            "cursor {cursor} is outside the WebSocket operation set of {count}"
+        )));
+    }
+    let page = operations.into_iter().skip(cursor).take(limit).collect();
+    Ok(OperationIndexEnvelope {
+        protocol: PROTOCOL.into(),
+        kind: "operation-index".into(),
+        version: VERSION.into(),
+        config_fingerprint: default_config_fingerprint(),
+        source_fingerprints: vec![source_fingerprint],
+        source: short_handle("src", &[bytes]),
+        operations: page,
+        next: None,
+        absent: Vec::new(),
+        exit: 0,
+    })
+}
+
+fn validate_websocket_source_identity(source: &WebSocketSessionDocument) -> Result<(), PlanError> {
     if source.kind != "websocket-session" || source.version != 1 {
         return Err(PlanError::InvalidWebSocketSource(
             "kind must be websocket-session and version must be 1".into(),
@@ -393,6 +461,19 @@ pub fn build_websocket_plan_with_configuration(
             "operationId must be a non-empty bounded string without control characters".into(),
         ));
     }
+    Ok(())
+}
+
+pub fn build_websocket_plan_with_configuration(
+    path: &Path,
+    bytes: &[u8],
+    configuration: &ProjectConfiguration,
+) -> Result<WebSocketPlan, PlanError> {
+    let document = parse_data_document(path, bytes)
+        .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    let mut source: WebSocketSessionDocument = serde_json::from_value(document)
+        .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    validate_websocket_source_identity(&source)?;
 
     let target = websocket_target(&source.url)?;
     let host = target
@@ -2376,6 +2457,56 @@ actions:
         assert!(matches!(
             plan.actions.as_slice(),
             [WebSocketAction::ExpectClose { codes, .. }] if codes == &[1000]
+        ));
+    }
+
+    #[test]
+    fn websocket_inspection_is_compact_filterable_and_format_equivalent() {
+        let json = inspect_websocket_session(
+            Path::new("session.json"),
+            include_bytes!("../../../fixtures/websocket/session.json"),
+            None,
+            50,
+            0,
+        )
+        .unwrap();
+        let yaml = inspect_websocket_session(
+            Path::new("session.yaml"),
+            include_bytes!("../../../fixtures/websocket/session.yaml"),
+            Some("subscribeBuildEvents"),
+            50,
+            0,
+        )
+        .unwrap();
+        assert_eq!(json.operations.len(), 1);
+        assert_eq!(yaml.operations.len(), 1);
+        assert_eq!(json.operations[0].1, "WEBSOCKET");
+        assert_eq!(json.operations[0].2, "wss://socket.example.test/v1/events");
+        assert_eq!(json.operations[0].3, "subscribeBuildEvents");
+        assert_eq!(json.operations[0].4, kahea_core::RiskClass::Write);
+        assert_eq!(json.operations[0].1, yaml.operations[0].1);
+        assert_eq!(json.operations[0].2, yaml.operations[0].2);
+        assert_eq!(json.operations[0].3, yaml.operations[0].3);
+        assert_eq!(json.operations[0].4, yaml.operations[0].4);
+
+        let filtered = inspect_websocket_session(
+            Path::new("session.json"),
+            include_bytes!("../../../fixtures/websocket/session.json"),
+            Some("does-not-match"),
+            50,
+            0,
+        )
+        .unwrap();
+        assert!(filtered.operations.is_empty());
+        assert!(matches!(
+            inspect_websocket_session(
+                Path::new("session.json"),
+                include_bytes!("../../../fixtures/websocket/session.json"),
+                None,
+                50,
+                2,
+            ),
+            Err(PlanError::InvalidWebSocketSource(message)) if message.contains("cursor 2")
         ));
     }
 
