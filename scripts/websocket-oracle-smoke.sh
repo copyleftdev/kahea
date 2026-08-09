@@ -98,6 +98,13 @@ done <"$run_root/grants.txt"
 jq -e '.kind == "websocket-observation" and .exit == 0 and .terminal_cause == "completed"' "$run_root/observation.json" >/dev/null \
   || fail "client observation is not successful"
 
+attempts=0
+while kill -0 "$server_pid" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+  sleep 0.05
+  attempts=$((attempts + 1))
+done
+kill -0 "$server_pid" 2>/dev/null \
+  && fail "oracle did not exit after the session; observation: $oracle_observation"
 wait "$server_pid" || fail "oracle exited unsuccessfully"
 server_pid=
 jq -e '.kind == "kahea-websocket-oracle-observation" and .seed == 42 and .case_id == "ws-000000000000002a-none" and .outcome == "completed" and .completed_steps == 8' "$oracle_observation" >/dev/null \

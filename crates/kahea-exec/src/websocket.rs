@@ -3217,7 +3217,7 @@ mod tests {
             plan.limits.connect_timeout_ms = 200;
             plan.limits.action_timeout_ms = 200;
             plan.limits.close_timeout_ms = 200;
-            plan.limits.idle_timeout_ms = 200;
+            plan.limits.idle_timeout_ms = 400;
             plan.limits.total_timeout_ms = 500;
             plan.limits.max_frame_bytes = 128;
             plan.actions = if fault == WebSocketFaultMode::SilentClose {
@@ -3439,15 +3439,18 @@ mod tests {
             code: 1000,
             reason: "ipv6-complete".into(),
         }];
-        let Ok(oracle) = start_websocket_oracle_on(
+        let oracle = match start_websocket_oracle_on(
             scenario.clone(),
             WebSocketFaultMode::None,
             WebSocketOracleTransport::Plaintext,
             IpAddr::V6(Ipv6Addr::LOCALHOST),
             0,
-        ) else {
-            eprintln!("skipping IPv6 WebSocket test: IPv6 loopback is unavailable");
-            return;
+        ) {
+            Ok(oracle) => oracle,
+            Err(error) => {
+                eprintln!("skipping IPv6 WebSocket test: {error}");
+                return;
+            }
         };
         let mut plan = oracle_plan(&oracle.manifest, &scenario);
         plan.actions = vec![WebSocketAction::ExpectClose {

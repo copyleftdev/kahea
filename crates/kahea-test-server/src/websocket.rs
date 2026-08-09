@@ -22,6 +22,7 @@ use tungstenite::protocol::frame::coding::{CloseCode, Data, OpCode};
 use tungstenite::{Message, WebSocket};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
 const SILENT_FAULT_DURATION: Duration = Duration::from_millis(750);
 const MAX_UPGRADE_BYTES: usize = 64 * 1024;
 
@@ -377,7 +378,15 @@ fn serve_websocket_oracle(
     observation: Arc<Mutex<WebSocketOracleObservation>>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), ServerError> {
-    let stream = accept_connection(&listener, &shutdown)?;
+    let stream = match accept_connection(&listener, &shutdown) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let mut state = observation.lock().expect("oracle observation lock");
+            state.outcome = "failed".into();
+            state.failure = Some(error.to_string());
+            return Ok(());
+        }
+    };
     let Some(stream) = stream else {
         return Ok(());
     };
@@ -409,7 +418,20 @@ fn accept_connection(
     listener: &TcpListener,
     shutdown: &AtomicBool,
 ) -> Result<Option<TcpStream>, ServerError> {
+    accept_connection_until(listener, shutdown, Instant::now() + ACCEPT_TIMEOUT)
+}
+
+fn accept_connection_until(
+    listener: &TcpListener,
+    shutdown: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<TcpStream>, ServerError> {
     while !shutdown.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            return Err(ServerError::InvalidRequest(
+                "WebSocket oracle timed out waiting for a connection".into(),
+            ));
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false)?;
@@ -581,10 +603,7 @@ fn inject_post_upgrade_fault<S: Read + Write>(
         WebSocketFaultMode::InvalidCloseCode => write_wire(socket, &[0x88, 0x02, 0x03, 0xed])?,
         WebSocketFaultMode::TruncatedFrame => write_wire(socket, &[0x81, 0x05, b'a', b'b'])?,
         WebSocketFaultMode::OversizedFrame => {
-            let length = scenario.oversized_payload_bytes as u64;
-            let mut wire = vec![0x82, 127];
-            wire.extend_from_slice(&length.to_be_bytes());
-            wire.resize(wire.len() + scenario.oversized_payload_bytes, 0x5a);
+            let wire = unmasked_binary_frame(scenario.oversized_payload_bytes);
             write_wire(socket, &wire)?;
         }
         WebSocketFaultMode::UnexpectedText => socket
@@ -599,6 +618,22 @@ fn inject_post_upgrade_fault<S: Read + Write>(
         _ => unreachable!("handshake and no-fault modes are routed elsewhere"),
     }
     Ok(())
+}
+
+fn unmasked_binary_frame(length: usize) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(length + 10);
+    wire.push(0x82);
+    if length < 126 {
+        wire.push(length as u8);
+    } else if length <= usize::from(u16::MAX) {
+        wire.push(126);
+        wire.extend_from_slice(&(length as u16).to_be_bytes());
+    } else {
+        wire.push(127);
+        wire.extend_from_slice(&(length as u64).to_be_bytes());
+    }
+    wire.resize(wire.len() + length, 0x5a);
+    wire
 }
 
 fn execute_script<S: Read + Write>(
@@ -869,6 +904,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("only a loopback interface"));
+    }
+
+    #[test]
+    fn missing_connection_and_frame_lengths_are_bounded() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let shutdown = AtomicBool::new(false);
+        let error = accept_connection_until(
+            &listener,
+            &shutdown,
+            Instant::now() + Duration::from_millis(20),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out waiting"));
+
+        assert_eq!(&unmasked_binary_frame(125)[..2], &[0x82, 125]);
+        assert_eq!(&unmasked_binary_frame(126)[..4], &[0x82, 126, 0, 126]);
+        assert_eq!(
+            &unmasked_binary_frame(usize::from(u16::MAX))[..4],
+            &[0x82, 126, 0xff, 0xff]
+        );
+        assert_eq!(
+            &unmasked_binary_frame(usize::from(u16::MAX) + 1)[..10],
+            &[0x82, 127, 0, 0, 0, 0, 0, 1, 0, 0]
+        );
     }
 
     #[test]

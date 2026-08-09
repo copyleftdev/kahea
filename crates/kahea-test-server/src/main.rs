@@ -24,14 +24,18 @@ struct Cli {
     /// Loopback port. Zero asks the OS for an unused port.
     #[arg(long, default_value_t = 0)]
     port: u16,
-    #[arg(long, value_enum, default_value_t = FaultArg::None)]
-    fault: FaultArg,
+    /// HTTP oracle fault to inject.
+    #[arg(long, value_enum)]
+    fault: Option<FaultArg>,
     /// WebSocket protocol or transport fault to inject.
-    #[arg(long, value_enum, default_value_t = WebSocketFaultMode::None)]
-    websocket_fault: WebSocketFaultMode,
+    #[arg(long, value_enum)]
+    websocket_fault: Option<WebSocketFaultMode>,
     /// Serve the WebSocket oracle over controlled plaintext or self-signed TLS.
-    #[arg(long, value_enum, default_value_t = WebSocketOracleTransport::Plaintext)]
-    websocket_transport: WebSocketOracleTransport,
+    #[arg(long, value_enum)]
+    websocket_transport: Option<WebSocketOracleTransport>,
+    /// Loopback interface for the WebSocket oracle (for example 127.0.0.1 or ::1).
+    #[arg(long)]
+    websocket_interface: Option<IpAddr>,
     /// Write the exact OpenAPI document served by this process.
     #[arg(long)]
     write_openapi: Option<PathBuf>,
@@ -78,11 +82,36 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), ServerError> {
+    validate_protocol_options(&cli)?;
     let seed = cli.seed.unwrap_or_else(startup_seed);
     match cli.protocol {
         ProtocolArg::Http => run_http(cli, seed),
         ProtocolArg::Websocket => run_websocket(cli, seed),
     }
+}
+
+fn validate_protocol_options(cli: &Cli) -> Result<(), ServerError> {
+    let incompatible = match cli.protocol {
+        ProtocolArg::Http => [
+            cli.websocket_fault.map(|_| "--websocket-fault"),
+            cli.websocket_transport.map(|_| "--websocket-transport"),
+            cli.websocket_interface.map(|_| "--websocket-interface"),
+        ]
+        .into_iter()
+        .flatten()
+        .next(),
+        ProtocolArg::Websocket => cli.fault.map(|_| "--fault"),
+    };
+    if let Some(option) = incompatible {
+        return Err(ServerError::InvalidRequest(format!(
+            "{option} is incompatible with --protocol {}",
+            match cli.protocol {
+                ProtocolArg::Http => "http",
+                ProtocolArg::Websocket => "websocket",
+            }
+        )));
+    }
+    Ok(())
 }
 
 fn run_http(cli: Cli, seed: u64) -> Result<(), ServerError> {
@@ -92,7 +121,11 @@ fn run_http(cli: Cli, seed: u64) -> Result<(), ServerError> {
         ));
     }
     let scenario = generate_scenario(seed);
-    let server = start_server_on(scenario.clone(), cli.fault.into(), cli.port)?;
+    let server = start_server_on(
+        scenario.clone(),
+        cli.fault.unwrap_or(FaultArg::None).into(),
+        cli.port,
+    )?;
     let openapi = openapi_document(&scenario, &server.manifest.base_url);
     if let Some(path) = cli.write_openapi.as_deref() {
         write_atomic(path, &serde_json::to_vec(&openapi)?)?;
@@ -115,9 +148,11 @@ fn run_websocket(cli: Cli, seed: u64) -> Result<(), ServerError> {
     let scenario = generate_websocket_scenario(seed);
     let server = start_websocket_oracle_on(
         scenario,
-        cli.websocket_fault,
-        cli.websocket_transport,
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        cli.websocket_fault.unwrap_or(WebSocketFaultMode::None),
+        cli.websocket_transport
+            .unwrap_or(WebSocketOracleTransport::Plaintext),
+        cli.websocket_interface
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         cli.port,
     )?;
     if let Some(path) = cli.write_manifest.as_deref() {
@@ -149,4 +184,50 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(arguments: &[&str]) -> Cli {
+        Cli::try_parse_from(arguments).expect("test CLI must parse")
+    }
+
+    #[test]
+    fn protocol_specific_options_fail_closed() {
+        for arguments in [
+            ["kahea-test-server", "--websocket-fault", "invalid-utf8"].as_slice(),
+            ["kahea-test-server", "--websocket-transport", "tls"].as_slice(),
+            ["kahea-test-server", "--websocket-interface", "::1"].as_slice(),
+            [
+                "kahea-test-server",
+                "--protocol",
+                "websocket",
+                "--fault",
+                "server-error",
+            ]
+            .as_slice(),
+        ] {
+            assert!(validate_protocol_options(&parse(arguments)).is_err());
+        }
+    }
+
+    #[test]
+    fn websocket_interface_accepts_both_loopback_families() {
+        for interface in ["127.0.0.1", "::1"] {
+            let cli = parse(&[
+                "kahea-test-server",
+                "--protocol",
+                "websocket",
+                "--websocket-interface",
+                interface,
+            ]);
+            validate_protocol_options(&cli).unwrap();
+            assert!(
+                cli.websocket_interface
+                    .is_some_and(|value| value.is_loopback())
+            );
+        }
+    }
 }

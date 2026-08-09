@@ -424,8 +424,10 @@ older than the workspace's Rust 1.95 floor, and is MIT/Apache-2.0 licensed.
 
 ### Controlled conformance oracle
 
-`kahea-test-server --protocol websocket` binds an IPv4 or IPv6 loopback address before it
-publishes its readiness manifest. A seed determines the path, Origin, subprotocol, ordered
+`kahea-test-server --protocol websocket` binds IPv4 loopback by default and accepts an explicit
+IPv4 or IPv6 loopback through `--websocket-interface` before it publishes its readiness manifest.
+The programmatic `start_websocket_oracle_on(interface, ...)` API enforces the same loopback-only
+boundary. A seed determines the path, Origin, subprotocol, ordered
 text/binary/control/fragment/close script, and stable case identity. Plaintext and generated,
 explicitly trusted TLS endpoints use the same script. The terminal oracle observation records the
 seed, case ID, connection count, handshake state, completed step count, selected fault, and outcome.
