@@ -1064,6 +1064,7 @@ dependencies = [
  "httparse",
  "kahea-core",
  "kahea-evidence",
+ "kahea-test-server",
  "rcgen",
  "reqwest",
  "rustls",
@@ -1127,11 +1128,17 @@ dependencies = [
 name = "kahea-test-server"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "clap",
  "kahea-ingest",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror",
+ "tungstenite",
  "url",
 ]
 

@@ -1,5 +1,14 @@
 //! Seeded, high-entropy loopback API used for end-to-end conformance testing.
 
+mod websocket;
+
+pub use websocket::{
+    RunningWebSocketOracle, WebSocketFaultMode, WebSocketOracleManifest,
+    WebSocketOracleObservation, WebSocketOracleScenario, WebSocketOracleStep,
+    WebSocketOracleTransport, generate_websocket_scenario, start_websocket_oracle,
+    start_websocket_oracle_on,
+};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;

@@ -28,4 +28,5 @@ tungstenite.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+kahea-test-server = { path = "../kahea-test-server" }
 rcgen = { version = "0.14.8", default-features = false, features = ["aws_lc_rs", "pem"] }
