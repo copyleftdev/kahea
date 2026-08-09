@@ -1,5 +1,8 @@
 # Architecture decisions
 
+Return to the [documentation index](../README.md) or read the user-facing
+[finite WebSocket guide](../websockets.md).
+
 Kāhea records decisions that change its deterministic planning, execution, or evidence contract in
 this directory. The product requirements document remains the product baseline; these records make
 post-v1 extensions reviewable without rewriting that historical document.

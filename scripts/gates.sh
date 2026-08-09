@@ -9,6 +9,7 @@ cargo test --workspace
 cargo build --release -p kahea -p kahea-test-server
 scripts/validate-distribution.sh
 scripts/validate-site.sh
+node scripts/validate-docs.mjs
 
 binary=target/release/kahea
 bytes=$(wc -c < "$binary")
@@ -17,11 +18,24 @@ if [ "$bytes" -gt 62914560 ]; then
   exit 1
 fi
 
-"$binary" describe | jq -e '.protocol == "kahea/k1" and .features.invoke.available and .features.conformance.available' >/dev/null
+"$binary" describe | jq -e '
+  .protocol == "kahea/k1" and
+  .features.invoke.available and
+  .features.conformance.available and
+  .features.websockets.available and
+  .features["asyncapi-websockets"].available and
+  (.formats | contains(["websocket-session-1-json-yaml", "asyncapi-2.6-yaml", "asyncapi-3.0-json"])) and
+  (.output_kinds | contains(["websocket-plan", "websocket-observation"])) and
+  (.configuration_keys | contains(["policy.websocket.allowed_origins", "policy.websocket.max_limits.total_timeout_ms"]))
+' >/dev/null
 "$binary" schema plan | jq -e '.kind == "schema" and .name == "plan"' >/dev/null
+for schema in websocket-session websocket-plan websocket-observation; do
+  "$binary" schema "$schema" | jq -e --arg schema "$schema" '.kind == "schema" and .name == $schema' >/dev/null
+done
 "$binary" inspect fixtures/corpus/swagger-petstore-3.0.json | jq -e '.operations | length > 0' >/dev/null
 "$binary" inspect fixtures/imports/postman-v3 | jq -e '.operations | length == 3' >/dev/null
 "$binary" inspect fixtures/workflows/billing.arazzo.yaml | jq -e '.operations[0][3] == "createAndReadInvoice"' >/dev/null
+"$binary" inspect fixtures/asyncapi/session-3.0.json | jq -e '.operations | length == 2' >/dev/null
 
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT INT TERM

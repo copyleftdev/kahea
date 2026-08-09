@@ -2,6 +2,15 @@
 
 ## 0.1.0
 
+- Added a complete finite WebSocket release guide covering the direct session format, controlled
+  local CLI lifecycle, equivalent MCP calls, AsyncAPI and workflow entry points, security model,
+  every default policy maximum, explicit non-goals, supported platforms, and release gates.
+- Added deterministic finite WebSocket plans, exact grants, policy-gated `ws`/`wss` transport,
+  bounded ordered execution, redacted transcript evidence, CLI/MCP/workflow parity, and the seeded
+  controlled fault oracle.
+- Added AsyncAPI 2.6/3.0 WebSocket ingestion into the canonical session planner with deterministic
+  message selection, local references, variables, parameters, schemas, binding headers, auth
+  references, structured absences, and no second executor.
 - Added a lightweight, kinetic GitHub Pages site with synchronized Claude Code, OpenAI Codex, direct MCP, and native-binary installation pathways; the static experience scores 100 across all four Lighthouse categories.
 - Packaged Kāhea as one canonical Claude Code and OpenAI Codex plugin, added repository marketplace metadata, and added official MCP Registry discovery metadata plus checksummed, attested, platform-specific MCPB release publishing.
 - Added a tag-driven GitHub Release pipeline for native Linux, macOS, and Windows binaries with SHA-256 checksums, CycloneDX SBOMs, third-party license notices, and signed build provenance.

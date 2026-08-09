@@ -15,7 +15,12 @@ response bodies, or exploit traffic against systems you do not own.
 Maintainers will acknowledge a report within five business days, keep the reporter informed while
 validating it, and coordinate disclosure after a fix is available. No bounty is currently offered.
 
-Kāhea treats API descriptions, configuration, DNS, redirects, and remote responses as untrusted. Planning is no-network; invocation requires sealed plans and exact grants. Redirects and ambient proxies are disabled, resolved addresses are pinned after policy evaluation, and secret material is resolved only at invocation. See the security model and limitations in the README before deploying Kāhea with sensitive APIs.
+Kāhea treats API descriptions, configuration, DNS, redirects, remote responses, and inbound
+WebSocket frames as untrusted. Planning is no-network; invocation requires sealed plans and exact
+grants. Redirects and ambient proxies are disabled, resolved addresses are pinned after policy
+evaluation, and secret material is resolved only at invocation. See the
+[finite WebSocket security model](docs/websockets.md#security-model) and limitations before
+deploying Kāhea with sensitive APIs.
 
 Conformance campaigns can multiply writes and intentionally send schema-invalid requests. Every campaign seals its maximum request count and requires an exact `conformance:execute:N` grant; campaigns containing negative cases additionally require `conformance:negative`. Existing network, method, production-write, destructive, secret, timeout, response-size, and evidence-redaction controls continue to apply to every case.
 

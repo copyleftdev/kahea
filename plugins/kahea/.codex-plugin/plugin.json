@@ -1,7 +1,7 @@
 {
   "name": "kahea",
   "version": "0.1.0",
-  "description": "Deterministic OpenAPI planning, contract testing, and policy-gated API execution for AI agents.",
+  "description": "Deterministic HTTP and finite WebSocket planning, testing, and policy-gated execution for AI agents.",
   "author": {
     "name": "copyleftdev",
     "url": "https://github.com/copyleftdev"
