@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --release -p kahea
+cargo build --release -p kahea -p kahea-test-server
 scripts/validate-distribution.sh
 scripts/validate-site.sh
 
@@ -39,6 +39,9 @@ cmp "$temporary/first.json" "$temporary/second.json"
   --cases 8 --seed 42 --store "$temporary/conformance-second" > "$temporary/conformance-second.json"
 cmp "$temporary/conformance-first.json" "$temporary/conformance-second.json"
 jq -e '.kind == "conformance-plan" and (.cases | length == 8) and (.required_grants | contains(["conformance:execute:8", "conformance:negative"]))' "$temporary/conformance-first.json" >/dev/null
+
+KAHEA_WEBSOCKET_ORACLE_ARTIFACTS="$temporary/websocket-oracle" \
+  scripts/websocket-oracle-smoke.sh
 
 KAHEA_DYNAMIC_ARTIFACTS="$temporary/dynamic" \
 KAHEA_DYNAMIC_CASES=4 \

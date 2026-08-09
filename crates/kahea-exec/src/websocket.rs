@@ -2498,6 +2498,10 @@ mod tests {
         PlannedAuth, PlannedHeader, RiskClass, WebSocketAction, WebSocketLimits,
         default_config_fingerprint, digest,
     };
+    use kahea_test_server::{
+        WebSocketFaultMode, WebSocketOracleTransport, generate_websocket_scenario,
+        start_websocket_oracle, start_websocket_oracle_on,
+    };
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -2605,6 +2609,68 @@ mod tests {
             },
         );
         plan.required_grants.push("net-insecure-websocket".into());
+        plan.seal().unwrap()
+    }
+
+    fn oracle_plan(
+        manifest: &kahea_test_server::WebSocketOracleManifest,
+        scenario: &kahea_test_server::WebSocketOracleScenario,
+    ) -> WebSocketPlan {
+        let parsed = Url::parse(&manifest.url).unwrap();
+        let host = parsed.host_str().unwrap();
+        let address = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
+            .parse::<IpAddr>()
+            .unwrap();
+        let cidr_grant = match address {
+            IpAddr::V4(address) => format!("net-cidr:{address}/32"),
+            IpAddr::V6(address) => format!("net-cidr:{address}/128"),
+        };
+        let mut plan = plan(manifest.url.clone(), cidr_grant);
+        if manifest.transport == WebSocketOracleTransport::Plaintext {
+            plan.required_grants.push("net-insecure-websocket".into());
+        }
+        plan.origin = scenario.expected_origin.clone();
+        plan.subprotocols = scenario.subprotocol.iter().cloned().collect();
+        if let Some(protocol) = &scenario.subprotocol {
+            plan.handshake_checks
+                .push(format!("subprotocol:{protocol}"));
+        }
+        plan.actions = vec![
+            WebSocketAction::SendText {
+                text: format!("client-{:016x}", scenario.seed),
+            },
+            WebSocketAction::ExpectText {
+                equals: format!("server-{:016x}", scenario.seed),
+                timeout_ms: Some(1_000),
+            },
+            WebSocketAction::SendBinary {
+                payload_base64: base64::engine::general_purpose::STANDARD
+                    .encode(scenario.seed.to_be_bytes()),
+            },
+            WebSocketAction::ExpectBinary {
+                payload_base64: base64::engine::general_purpose::STANDARD.encode(
+                    scenario
+                        .seed
+                        .to_be_bytes()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>(),
+                ),
+                timeout_ms: Some(1_000),
+            },
+            WebSocketAction::ExpectText {
+                equals: format!("seeded-{:016x}", scenario.seed),
+                timeout_ms: Some(1_000),
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: Some("oracle-complete".into()),
+                timeout_ms: Some(1_000),
+            },
+        ];
         plan.seal().unwrap()
     }
 
@@ -3058,28 +3124,354 @@ mod tests {
     }
 
     #[test]
+    fn controlled_oracle_is_seeded_scripted_bounded_and_tls_capable() {
+        let mut scenario = generate_websocket_scenario(0x51_0c_e7);
+        scenario.handshake_delay_ms = 5;
+        scenario.frame_delay_ms = 5;
+        scenario.close_delay_ms = 5;
+        let oracle = start_websocket_oracle(
+            scenario.clone(),
+            WebSocketFaultMode::None,
+            WebSocketOracleTransport::Plaintext,
+        )
+        .unwrap();
+        let plan = oracle_plan(&oracle.manifest, &scenario);
+        let (root, evidence_store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &evidence_store).unwrap()
+        else {
+            panic!("seeded oracle must produce a terminal observation")
+        };
+        assert_eq!(observation.exit, 0);
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::Completed
+        );
+        assert_eq!(observation.negotiated_subprotocol, scenario.subprotocol);
+        let oracle_observation = oracle.wait().unwrap();
+        assert_eq!(oracle_observation.seed, scenario.seed);
+        assert_eq!(oracle_observation.case_id, "ws-0000000000510ce7-none");
+        assert_eq!(oracle_observation.completed_steps, scenario.steps.len());
+        assert_eq!(oracle_observation.outcome, "completed");
+        drop(evidence_store);
+        fs::remove_dir_all(root).unwrap();
+
+        let mut tls_scenario = generate_websocket_scenario(0x715);
+        tls_scenario.expected_origin = None;
+        tls_scenario.subprotocol = None;
+        tls_scenario.steps = vec![kahea_test_server::WebSocketOracleStep::SendClose {
+            code: 1000,
+            reason: "oracle-complete".into(),
+        }];
+        let tls_oracle = start_websocket_oracle(
+            tls_scenario.clone(),
+            WebSocketFaultMode::None,
+            WebSocketOracleTransport::Tls,
+        )
+        .unwrap();
+        let mut tls_plan = oracle_plan(&tls_oracle.manifest, &tls_scenario);
+        tls_plan.actions = vec![WebSocketAction::ExpectClose {
+            codes: vec![1000],
+            reason: Some("oracle-complete".into()),
+            timeout_ms: Some(1_000),
+        }];
+        let tls_plan = tls_plan.seal().unwrap();
+        let mut tls_options = options(&tls_plan);
+        tls_options.additional_root_certificates_pem.push(
+            tls_oracle
+                .manifest
+                .root_certificate_pem
+                .as_deref()
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        );
+        let (tls_root, tls_store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&tls_plan, &tls_options, &tls_store).unwrap()
+        else {
+            panic!("TLS oracle must produce a terminal observation")
+        };
+        assert_eq!(observation.exit, 0);
+        assert_eq!(tls_oracle.wait().unwrap().completed_steps, 1);
+        drop(tls_store);
+        fs::remove_dir_all(tls_root).unwrap();
+    }
+
+    #[test]
+    fn controlled_oracle_fault_matrix_is_reproducible_and_fails_closed() {
+        for fault in WebSocketFaultMode::ALL
+            .into_iter()
+            .filter(|fault| *fault != WebSocketFaultMode::None)
+        {
+            let mut scenario = generate_websocket_scenario(0xfa017);
+            scenario.expected_origin = None;
+            scenario.subprotocol = None;
+            scenario.oversized_payload_bytes = 129;
+            scenario.steps.clear();
+            let oracle =
+                start_websocket_oracle(scenario, fault, WebSocketOracleTransport::Plaintext)
+                    .unwrap();
+            let mut plan = plan(oracle.manifest.url.clone(), "net-cidr:127.0.0.1/32".into());
+            plan.required_grants.push("net-insecure-websocket".into());
+            plan.limits.connect_timeout_ms = 200;
+            plan.limits.action_timeout_ms = 200;
+            plan.limits.close_timeout_ms = 200;
+            plan.limits.idle_timeout_ms = 200;
+            plan.limits.total_timeout_ms = 500;
+            plan.limits.max_frame_bytes = 128;
+            plan.actions = if fault == WebSocketFaultMode::SilentClose {
+                vec![WebSocketAction::Close {
+                    code: 1000,
+                    reason: "client-finished".into(),
+                }]
+            } else {
+                vec![
+                    WebSocketAction::ExpectText {
+                        equals: "oracle-expected".into(),
+                        timeout_ms: Some(200),
+                    },
+                    WebSocketAction::ExpectClose {
+                        codes: vec![1000],
+                        reason: None,
+                        timeout_ms: Some(200),
+                    },
+                ]
+            };
+            let plan = plan.seal().unwrap();
+            let (root, store) = store();
+            let WebSocketConnectResult::Observation(observation) =
+                execute_websocket(&plan, &options(&plan), &store).unwrap()
+            else {
+                panic!("fault {fault:?} must produce a terminal observation")
+            };
+            let expected_cause = match fault {
+                WebSocketFaultMode::BadAcceptKey
+                | WebSocketFaultMode::BadStatus
+                | WebSocketFaultMode::MissingUpgradeHeader
+                | WebSocketFaultMode::Redirect
+                | WebSocketFaultMode::NegotiatedExtension => {
+                    WebSocketTerminalCause::HandshakeCheckFailed
+                }
+                WebSocketFaultMode::InvalidUtf8
+                | WebSocketFaultMode::MaskedServerFrame
+                | WebSocketFaultMode::ReservedOpcode
+                | WebSocketFaultMode::ReservedBit
+                | WebSocketFaultMode::FragmentedControlFrame
+                | WebSocketFaultMode::InvalidClosePayload
+                | WebSocketFaultMode::TruncatedFrame
+                | WebSocketFaultMode::AbruptClose => WebSocketTerminalCause::ProtocolViolation,
+                WebSocketFaultMode::OversizedFrame => WebSocketTerminalCause::BudgetExhausted,
+                WebSocketFaultMode::InvalidCloseCode | WebSocketFaultMode::UnexpectedText => {
+                    WebSocketTerminalCause::ExpectationFailed
+                }
+                WebSocketFaultMode::SilentHandshake => WebSocketTerminalCause::ConnectTimeout,
+                WebSocketFaultMode::SilentFrame => WebSocketTerminalCause::ActionTimeout,
+                WebSocketFaultMode::SilentClose => WebSocketTerminalCause::CloseTimeout,
+                WebSocketFaultMode::None => unreachable!(),
+            };
+            assert_ne!(observation.exit, 0, "fault {fault:?} passed unexpectedly");
+            assert_eq!(
+                observation.terminal_cause, expected_cause,
+                "fault {fault:?} mapped to the wrong terminal cause"
+            );
+            let oracle_observation = oracle.wait().unwrap();
+            assert_eq!(oracle_observation.seed, 0xfa017);
+            assert_eq!(
+                oracle_observation.case_id,
+                format!("ws-00000000000fa017-{}", fault.slug())
+            );
+            assert_eq!(oracle_observation.connections, 1);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn controlled_oracle_proves_idle_total_and_connection_deadlines() {
+        let mut idle_scenario = generate_websocket_scenario(0xd1e);
+        idle_scenario.expected_origin = None;
+        idle_scenario.subprotocol = None;
+        idle_scenario.steps.clear();
+        let idle_oracle = start_websocket_oracle(
+            idle_scenario,
+            WebSocketFaultMode::SilentFrame,
+            WebSocketOracleTransport::Plaintext,
+        )
+        .unwrap();
+        let mut idle_plan = plan(
+            idle_oracle.manifest.url.clone(),
+            "net-cidr:127.0.0.1/32".into(),
+        );
+        idle_plan
+            .required_grants
+            .push("net-insecure-websocket".into());
+        idle_plan.limits.connect_timeout_ms = 200;
+        idle_plan.limits.action_timeout_ms = 200;
+        idle_plan.limits.idle_timeout_ms = 50;
+        idle_plan.limits.close_timeout_ms = 200;
+        idle_plan.limits.total_timeout_ms = 500;
+        idle_plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "never".into(),
+                timeout_ms: Some(200),
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: Some(200),
+            },
+        ];
+        let idle_plan = idle_plan.seal().unwrap();
+        let (idle_root, idle_store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&idle_plan, &options(&idle_plan), &idle_store).unwrap()
+        else {
+            panic!("idle deadline must return an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::IdleTimeout
+        );
+        assert_eq!(observation.exit, 3);
+        assert_eq!(
+            idle_oracle.wait().unwrap().case_id,
+            "ws-0000000000000d1e-silent-frame"
+        );
+        drop(idle_store);
+        fs::remove_dir_all(idle_root).unwrap();
+
+        let mut total_scenario = generate_websocket_scenario(0x707a1);
+        total_scenario.expected_origin = None;
+        total_scenario.subprotocol = None;
+        total_scenario.frame_delay_ms = 200;
+        total_scenario.steps = vec![
+            kahea_test_server::WebSocketOracleStep::SendText {
+                value: "first".into(),
+            },
+            kahea_test_server::WebSocketOracleStep::SendText {
+                value: "second".into(),
+            },
+        ];
+        let total_oracle = start_websocket_oracle(
+            total_scenario,
+            WebSocketFaultMode::None,
+            WebSocketOracleTransport::Plaintext,
+        )
+        .unwrap();
+        let mut total_plan = plan(
+            total_oracle.manifest.url.clone(),
+            "net-cidr:127.0.0.1/32".into(),
+        );
+        total_plan
+            .required_grants
+            .push("net-insecure-websocket".into());
+        total_plan.limits.connect_timeout_ms = 250;
+        total_plan.limits.action_timeout_ms = 250;
+        total_plan.limits.idle_timeout_ms = 250;
+        total_plan.limits.close_timeout_ms = 250;
+        total_plan.limits.total_timeout_ms = 350;
+        total_plan.actions = vec![
+            WebSocketAction::ExpectText {
+                equals: "first".into(),
+                timeout_ms: Some(250),
+            },
+            WebSocketAction::ExpectText {
+                equals: "second".into(),
+                timeout_ms: Some(250),
+            },
+            WebSocketAction::ExpectClose {
+                codes: vec![1000],
+                reason: None,
+                timeout_ms: Some(250),
+            },
+        ];
+        let total_plan = total_plan.seal().unwrap();
+        let (total_root, total_store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&total_plan, &options(&total_plan), &total_store).unwrap()
+        else {
+            panic!("total deadline must return an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::TotalTimeout
+        );
+        assert_eq!(observation.exit, 3);
+        assert_eq!(
+            total_oracle.wait().unwrap().case_id,
+            "ws-00000000000707a1-none"
+        );
+        drop(total_store);
+        fs::remove_dir_all(total_root).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut plan = plan(
+            format!("ws://{address}/unbound"),
+            "net-cidr:127.0.0.1/32".into(),
+        );
+        plan.required_grants.push("net-insecure-websocket".into());
+        let plan = plan.seal().unwrap();
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            connect_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("refused loopback connection must return an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::ConnectionFailure
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ipv6_loopback_handshake_uses_the_exact_runtime_grants() {
-        let Ok(listener) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) else {
+        let mut scenario = generate_websocket_scenario(0x1_6);
+        scenario.expected_origin = None;
+        scenario.subprotocol = None;
+        scenario.steps = vec![kahea_test_server::WebSocketOracleStep::SendClose {
+            code: 1000,
+            reason: "ipv6-complete".into(),
+        }];
+        let Ok(oracle) = start_websocket_oracle_on(
+            scenario.clone(),
+            WebSocketFaultMode::None,
+            WebSocketOracleTransport::Plaintext,
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            0,
+        ) else {
             eprintln!("skipping IPv6 WebSocket test: IPv6 loopback is unavailable");
             return;
         };
-        let plan = ws_plan(&listener);
-        let server = thread::spawn(move || {
-            let stream = accept_test_connection(&listener);
-            tungstenite::accept(stream).unwrap()
-        });
+        let mut plan = oracle_plan(&oracle.manifest, &scenario);
+        plan.actions = vec![WebSocketAction::ExpectClose {
+            codes: vec![1000],
+            reason: Some("ipv6-complete".into()),
+            timeout_ms: Some(1_000),
+        }];
+        let plan = plan.seal().unwrap();
         let (root, store) = store();
-        let WebSocketConnectResult::Connected(connection) =
-            connect_websocket(&plan, &options(&plan), &store).unwrap()
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
         else {
-            panic!("expected IPv6 WebSocket handshake")
+            panic!("expected terminal IPv6 WebSocket observation")
         };
         assert_eq!(
-            connection.metadata.resolved_origin.ip(),
+            observation
+                .resolved_origin
+                .as_deref()
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap()
+                .ip(),
             Ipv6Addr::LOCALHOST
         );
-        drop(connection);
-        server.join().unwrap();
+        assert_eq!(observation.exit, 0);
+        assert_eq!(oracle.wait().unwrap().completed_steps, 1);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

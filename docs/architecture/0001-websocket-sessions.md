@@ -422,6 +422,22 @@ controlled oracle in #16. `tungstenite` is blocking, accepts caller-owned stream
 and message limits before reads, creates no runtime or background thread, supports Rust versions
 older than the workspace's Rust 1.95 floor, and is MIT/Apache-2.0 licensed.
 
+### Controlled conformance oracle
+
+`kahea-test-server --protocol websocket` binds an IPv4 or IPv6 loopback address before it
+publishes its readiness manifest. A seed determines the path, Origin, subprotocol, ordered
+text/binary/control/fragment/close script, and stable case identity. Plaintext and generated,
+explicitly trusted TLS endpoints use the same script. The terminal oracle observation records the
+seed, case ID, connection count, handshake state, completed step count, selected fault, and outcome.
+
+The fault surface is explicit and replayable: bad accept key/status/upgrade headers, redirects,
+extension negotiation, invalid UTF-8, masked server frames, reserved opcode/RSV bits, fragmented
+control frames, invalid close payload/code, truncated and oversized frames, unexpected messages,
+abrupt close, and silence during handshake/frame/close phases. The executor test matrix asserts the
+stable failure class for every fault. `scripts/websocket-oracle-smoke.sh` proves the public CLI path
+against seed `42`; `scripts/gates.sh` runs it alongside the existing HTTP dynamic conformance gate.
+No oracle mode binds a non-loopback interface or requires public network access.
+
 ## Alternatives considered
 
 ### Add optional WebSocket fields to `RequestPlan`
