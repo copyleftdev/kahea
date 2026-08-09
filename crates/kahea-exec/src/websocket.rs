@@ -3420,10 +3420,12 @@ mod tests {
         else {
             panic!("refused loopback connection must return an observation")
         };
-        assert_eq!(
+        // A closed loopback port is refused immediately on Unix, while Windows can
+        // surface the same bounded `connect_timeout` attempt as a timeout.
+        assert!(matches!(
             observation.terminal_cause,
-            WebSocketTerminalCause::ConnectionFailure
-        );
+            WebSocketTerminalCause::ConnectionFailure | WebSocketTerminalCause::ConnectTimeout
+        ));
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
