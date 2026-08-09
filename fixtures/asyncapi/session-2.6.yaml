@@ -1,0 +1,66 @@
+asyncapi: 2.6.0
+info:
+  title: Build events
+  version: 1.0.0
+servers:
+  production:
+    url: wss://socket.example.test/{version}
+    protocol: wss
+    variables:
+      version:
+        default: v1
+    security:
+      - bearerAuth: []
+channels:
+  /events/{room}:
+    servers: [production]
+    parameters:
+      room:
+        schema:
+          type: string
+          default: builds
+    bindings:
+      ws:
+        headers:
+          type: object
+          required: [X-Client]
+          properties:
+            X-Client:
+              type: string
+              default: kahea-asyncapi
+        bindingVersion: 0.1.0
+    publish:
+      operationId: subscribeBuilds
+      message:
+        $ref: '#/components/messages/Subscribe'
+    subscribe:
+      operationId: receiveBuild
+      message:
+        $ref: '#/components/messages/Build'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  messages:
+    Subscribe:
+      name: Subscribe
+      contentType: application/json
+      payload:
+        type: object
+        example:
+          type: subscribe
+          topic: builds
+    Build:
+      name: Build
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/BuildEvent'
+  schemas:
+    BuildEvent:
+      type: object
+      required: [type, id]
+      properties:
+        type: { const: build }
+        id: { type: string }
+

@@ -12,12 +12,14 @@ use kahea_exec::{
     ExecError, InvocationResult, InvokeOptions, WebSocketConnectResult, execute_websocket, invoke,
 };
 use kahea_ingest::{
-    inspect_source, load_source, parse_data_document, read_source_artifact, resolve_operation,
+    inspect_asyncapi, inspect_source, is_asyncapi, load_source, parse_data_document,
+    read_source_artifact, resolve_operation,
 };
 use kahea_plan::{
-    PlanOptions, ProjectConfiguration, build_plan_with_configuration,
-    build_websocket_plan_with_configuration, inspect_websocket_session, is_websocket_session,
-    load_plan, load_websocket_plan, parse_explicit_field, store_plan, store_websocket_plan,
+    PlanOptions, ProjectConfiguration, build_asyncapi_websocket_plan_with_configuration,
+    build_plan_with_configuration, build_websocket_plan_with_configuration,
+    inspect_websocket_session, is_websocket_session, load_plan, load_websocket_plan,
+    parse_explicit_field, store_plan, store_websocket_plan,
 };
 use kahea_workflow::{
     build_workflow_plan, inspect_workflows, invoke_workflow, is_arazzo, load_workflow_plan,
@@ -249,6 +251,14 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         message: error.to_string(),
                         exit: 2,
                     })?
+            } else if parsed.as_ref().is_some_and(is_asyncapi) {
+                inspect_asyncapi(&source, &bytes, r#match.as_deref(), limit, cursor).map_err(
+                    |error| CliError {
+                        code: "invalid-source",
+                        message: error.to_string(),
+                        exit: 2,
+                    },
+                )?
             } else if parsed.as_ref().is_some_and(is_arazzo) {
                 inspect_workflows(
                     parsed.as_ref().expect("checked"),
@@ -355,6 +365,41 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         exit: 2,
                     });
                 }
+                store_websocket_plan(&store, &websocket_plan).map_err(|error| CliError {
+                    code: "plan-store-failed",
+                    message: error.to_string(),
+                    exit: 2,
+                })?;
+                write_envelope(&websocket_plan).map_err(io_error)?;
+                return Ok(0);
+            }
+            if raw_source.as_ref().is_some_and(is_asyncapi) {
+                if input.is_some() || content_type.is_some() || !checks.is_empty() {
+                    return Err(CliError {
+                        code: "invalid-asyncapi-plan-options",
+                        message: "AsyncAPI WebSocket plans accept only --server, --auth SCHEME=PROFILE, and --set server.NAME/channel.NAME inputs".into(),
+                        exit: 2,
+                    });
+                }
+                let websocket_plan = build_asyncapi_websocket_plan_with_configuration(
+                    &source,
+                    &source_bytes,
+                    &operation,
+                    PlanOptions {
+                        server,
+                        auth,
+                        content_type: None,
+                        input: None,
+                        explicit,
+                        checks: Vec::new(),
+                    },
+                    &configuration,
+                )
+                .map_err(|error| CliError {
+                    code: "invalid-asyncapi-plan",
+                    message: error.to_string(),
+                    exit: 2,
+                })?;
                 store_websocket_plan(&store, &websocket_plan).map_err(|error| CliError {
                     code: "plan-store-failed",
                     message: error.to_string(),

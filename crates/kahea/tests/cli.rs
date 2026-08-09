@@ -1098,3 +1098,59 @@ fn websocket_cli_rejects_invalid_sources_and_unsealed_overrides() {
     assert_eq!(error["code"], "invalid-websocket-plan-options");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn asyncapi_cli_inspects_and_seals_the_selected_message_variant() {
+    let source = fixture("asyncapi/session-3.0.json");
+    let index = output_json(&["inspect", source.to_str().unwrap()]);
+    assert_eq!(index["operations"].as_array().unwrap().len(), 2);
+    let selected = index["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation[3] == "watchBuilds#Started-1")
+        .unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let root = scratch("asyncapi-plan");
+    let store = root.join("state");
+    let output = Command::new(binary())
+        .args([
+            "plan",
+            source.to_str().unwrap(),
+            &selected,
+            "--set",
+            "channel.room=ci",
+            "--store",
+            store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["kind"], "websocket-plan");
+    assert_eq!(plan["operation"], selected);
+    assert_eq!(plan["target"], "wss://socket.example.test/v1/events/ci");
+    assert_eq!(plan["actions"][0]["type"], "expect-json");
+    assert_eq!(plan["source_fingerprints"], index["source_fingerprints"]);
+
+    let ambiguous = Command::new(binary())
+        .args([
+            "plan",
+            source.to_str().unwrap(),
+            "watchBuilds",
+            "--store",
+            store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(ambiguous.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    assert!(error["message"].as_str().unwrap().contains("ambiguous"));
+    std::fs::remove_dir_all(root).unwrap();
+}
