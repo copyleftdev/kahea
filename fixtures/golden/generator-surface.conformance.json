@@ -743,7 +743,7 @@
       "target": "https://api.example.test/surface/7777?count=40&kind=alpha&verbose=true"
     }
   ],
-  "fingerprint": "b3:ccc65c19814fe0e9000ca64ade139272cb49acba17e0e42d2e74e01d2d30080d",
+  "fingerprint": "b3:7a0bd1f099ed9c26602a4b919ced22a8c486280e4ba5ff829567fb6271acc349",
   "requested_cases": 12,
   "required_grants": [
     "conformance:execute:12",
