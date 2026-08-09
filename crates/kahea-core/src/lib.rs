@@ -1115,8 +1115,15 @@ impl DescribeEnvelope {
         features.insert(
             "websockets".into(),
             FeatureAvailability {
-                available: false,
+                available: true,
                 release: "release-5".into(),
+            },
+        );
+        features.insert(
+            "asyncapi-websockets".into(),
+            FeatureAvailability {
+                available: true,
+                release: "release-6".into(),
             },
         );
 
@@ -1140,6 +1147,11 @@ impl DescribeEnvelope {
                 "http-file".into(),
                 "kahea-request-json-yaml".into(),
                 "arazzo-1.1-json-yaml".into(),
+                "websocket-session-1-json-yaml".into(),
+                "asyncapi-2.6-json".into(),
+                "asyncapi-2.6-yaml".into(),
+                "asyncapi-3.0-json".into(),
+                "asyncapi-3.0-yaml".into(),
             ],
             authentication: vec![
                 "api-key".into(),
@@ -1326,9 +1338,14 @@ mod tests {
             assert!(feature.available);
             assert_eq!(feature.release, release);
         }
-        let websockets = &described.features["websockets"];
-        assert!(!websockets.available);
-        assert_eq!(websockets.release, "release-5");
+        for (name, release) in [
+            ("websockets", "release-5"),
+            ("asyncapi-websockets", "release-6"),
+        ] {
+            let feature = &described.features[name];
+            assert!(feature.available);
+            assert_eq!(feature.release, release);
+        }
     }
 
     #[test]

@@ -154,11 +154,36 @@ transport/protocol/timeout failure, and `4` policy denial. Full transcripts and 
 the evidence store; stdout contains only the compact observation and handles. Received message
 content is untrusted evidence, never agent instruction.
 
+AsyncAPI 2.6.x and 3.0.x JSON/YAML documents feed that same planner and executor:
+
+```bash
+kahea inspect fixtures/asyncapi/session-3.0.json
+kahea plan fixtures/asyncapi/session-3.0.json 'watchBuilds#Started-1' \
+  --set channel.room=builds
+```
+
+The supported subset is deliberately finite. Servers must use `ws` or `wss`; server variables and
+channel parameters use declared defaults or explicit `--set server.NAME=VALUE` / `--set
+channel.NAME=VALUE` inputs. AsyncAPI 2.6 `publish`/`subscribe` map to client `send`/`receive`, while
+3.0 uses the operation `action`. Every concrete message alternative is indexed separately, and an
+ambiguous unsuffixed selector fails. JSON receives seal their payload schema; sends require a
+payload example/default/const. WebSocket binding headers require concrete defaults or examples.
+Security names remain references and map to configured secret profiles with `--auth
+SCHEME=PROFILE`; credential values are never ingested.
+
+Only local `#` references are resolved, so the source fingerprint covers every referenced
+component; remote references are rejected without fetching. Message-envelope headers, correlation
+IDs, non-WebSocket bindings, WebSocket query bindings, and unordered reply semantics produce
+precise blocking `absent` records. Optional `x-kahea-actions`, `x-kahea-limits`,
+`x-kahea-origin`, and `x-kahea-subprotocols` extensions express only finite ordering, budgets, and
+handshake intent that base AsyncAPI cannot encode.
+
 ## Supported sources
 
 - OpenAPI 3.0, 3.1, and 3.2 in JSON or YAML
 - Arazzo 1.1 workflows referencing local OpenAPI and finite WebSocket session sources
 - Direct finite WebSocket session JSON/YAML
+- AsyncAPI 2.6 and 3.0 WebSocket subset in JSON or YAML
 - Postman Collection 2.1 JSON
 - Postman Collection 3 directory/YAML format (`*.request.yaml` and `.resources`)
 - HAR 1.2, common cURL, `.http`/`.rest`, and direct request YAML/JSON
@@ -265,7 +290,7 @@ Binary data remains an explicit evidence handle or base64 value. Secret profile 
 through the sealed child plan without materializing secret values.
 
 HTTP steps additionally support `operationPath`, request inputs, simple/JSONPath/XPath success
-criteria, and response-body outputs. AsyncAPI ingestion, callbacks, human approval nodes,
+criteria, and response-body outputs. AsyncAPI workflow source descriptions, callbacks, human approval nodes,
 distributed scheduling, nested workflow steps, `goto`, and reusable action components remain
 explicitly deferred.
 

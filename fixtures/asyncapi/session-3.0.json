@@ -1,0 +1,49 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {"title": "Build events", "version": "1.0.0"},
+  "servers": {
+    "production": {
+      "host": "socket.example.test",
+      "protocol": "wss",
+      "pathname": "/v1"
+    }
+  },
+  "channels": {
+    "buildEvents": {
+      "address": "/events/{room}",
+      "servers": [{"$ref": "#/servers/production"}],
+      "parameters": {
+        "room": {"default": "builds"}
+      },
+      "messages": {
+        "started": {"$ref": "#/components/messages/Started"},
+        "finished": {"$ref": "#/components/messages/Finished"}
+      }
+    }
+  },
+  "operations": {
+    "watchBuilds": {
+      "action": "receive",
+      "channel": {"$ref": "#/channels/buildEvents"},
+      "messages": [
+        {"$ref": "#/channels/buildEvents/messages/started"},
+        {"$ref": "#/channels/buildEvents/messages/finished"}
+      ]
+    }
+  },
+  "components": {
+    "messages": {
+      "Started": {
+        "name": "Started",
+        "contentType": "application/json",
+        "payload": {"type": "object", "required": ["type"], "properties": {"type": {"const": "started"}}}
+      },
+      "Finished": {
+        "name": "Finished",
+        "contentType": "application/json",
+        "payload": {"type": "object", "required": ["type"], "properties": {"type": {"const": "finished"}}}
+      }
+    }
+  }
+}
+

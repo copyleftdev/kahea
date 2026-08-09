@@ -6,7 +6,10 @@ use kahea_core::{
     PlannedHeader, RequestPlan, RiskClass, VERSION, WebSocketAction, WebSocketLimits,
     WebSocketPlan, WebSocketSessionSource, default_config_fingerprint, digest, short_handle,
 };
-use kahea_ingest::{OpenApiSource, OperationDefinition, parse_data_document};
+use kahea_ingest::{
+    OpenApiSource, OperationDefinition, compile_asyncapi_websocket, load_asyncapi,
+    parse_data_document, resolve_asyncapi_operation,
+};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -450,8 +453,99 @@ pub fn build_websocket_plan_with_configuration(
 ) -> Result<WebSocketPlan, PlanError> {
     let document = parse_data_document(path, bytes)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
-    let mut source: WebSocketSessionSource = serde_json::from_value(document)
+    let source: WebSocketSessionSource = serde_json::from_value(document)
         .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    validate_websocket_source_identity(&source)?;
+    let source_fingerprint = digest(bytes);
+    let operation = short_handle(
+        "op",
+        &[
+            source_fingerprint.as_bytes(),
+            source.operation_id.as_bytes(),
+        ],
+    );
+    seal_websocket_source(source, vec![source_fingerprint], operation, configuration)
+}
+
+pub fn build_asyncapi_websocket_plan_with_configuration(
+    path: &Path,
+    bytes: &[u8],
+    selector: &str,
+    options: PlanOptions,
+    configuration: &ProjectConfiguration,
+) -> Result<WebSocketPlan, PlanError> {
+    if options.input.is_some() || options.content_type.is_some() || !options.checks.is_empty() {
+        return Err(PlanError::InvalidWebSocketSource(
+            "AsyncAPI WebSocket plans do not accept HTTP bodies, content types, or checks".into(),
+        ));
+    }
+    let source = load_asyncapi(path, bytes)
+        .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    let operation = resolve_asyncapi_operation(&source, selector)
+        .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    let values = options.explicit.into_iter().collect::<BTreeMap<_, _>>();
+    if values
+        .keys()
+        .any(|key| !key.starts_with("server.") && !key.starts_with("channel."))
+    {
+        return Err(PlanError::InvalidWebSocketSource(
+            "AsyncAPI --set keys must use server.NAME or channel.NAME".into(),
+        ));
+    }
+    let requested_limits = operation
+        .operation
+        .get("x-kahea-limits")
+        .or_else(|| source.document.get("x-kahea-limits"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            PlanError::InvalidWebSocketSource(format!("invalid x-kahea-limits: {error}"))
+        })?
+        .unwrap_or_else(|| {
+            websocket_limits_from_policy(&configuration.policy.websocket.max_limits)
+        });
+    let compiled = compile_asyncapi_websocket(
+        &source,
+        &operation,
+        options.server.as_deref(),
+        options.auth.as_deref(),
+        &values,
+        requested_limits,
+    )
+    .map_err(|error| PlanError::InvalidWebSocketSource(error.to_string()))?;
+    seal_websocket_source(
+        compiled,
+        vec![source.source_fingerprint],
+        operation.handle,
+        configuration,
+    )
+}
+
+fn websocket_limits_from_policy(limits: &WebSocketPolicyLimits) -> WebSocketLimits {
+    WebSocketLimits {
+        connect_timeout_ms: limits.connect_timeout_ms,
+        action_timeout_ms: limits.action_timeout_ms,
+        idle_timeout_ms: limits.idle_timeout_ms,
+        close_timeout_ms: limits.close_timeout_ms,
+        total_timeout_ms: limits.total_timeout_ms,
+        max_frame_bytes: limits.max_frame_bytes,
+        max_message_bytes: limits.max_message_bytes,
+        max_inbound_frames: limits.max_inbound_frames,
+        max_outbound_frames: limits.max_outbound_frames,
+        max_inbound_messages: limits.max_inbound_messages,
+        max_outbound_messages: limits.max_outbound_messages,
+        max_inbound_bytes: limits.max_inbound_bytes,
+        max_outbound_bytes: limits.max_outbound_bytes,
+    }
+}
+
+fn seal_websocket_source(
+    mut source: WebSocketSessionSource,
+    source_fingerprints: Vec<String>,
+    operation: String,
+    configuration: &ProjectConfiguration,
+) -> Result<WebSocketPlan, PlanError> {
     validate_websocket_source_identity(&source)?;
 
     let target = websocket_target(&source.url)?;
@@ -550,22 +644,15 @@ pub fn build_websocket_plan_with_configuration(
         protocols => handshake_checks.push(format!("subprotocol:any({})", protocols.join(","))),
     }
 
-    let source_fingerprint = digest(bytes);
     WebSocketPlan {
         protocol: PROTOCOL.into(),
         kind: "websocket-plan".into(),
         version: VERSION.into(),
         config_fingerprint: configuration.config_fingerprint()?,
         policy_fingerprint: configuration.websocket_policy_fingerprint()?,
-        source_fingerprints: vec![source_fingerprint.clone()],
+        source_fingerprints,
         id: String::new(),
-        operation: short_handle(
-            "op",
-            &[
-                source_fingerprint.as_bytes(),
-                source.operation_id.as_bytes(),
-            ],
-        ),
+        operation,
         target: target.to_string(),
         risk,
         required_grants: grants,

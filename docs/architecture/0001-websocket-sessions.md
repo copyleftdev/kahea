@@ -50,9 +50,10 @@ extension.
 
 ### Direct session source
 
-The first implementation accepts a local JSON or YAML `websocket-session` source. AsyncAPI will be
-a later ingestion adapter into the same plan type, not another executor. Planning never performs
-DNS, TLS, authentication, or network access.
+The first implementation accepts a local JSON or YAML `websocket-session` source. The later
+AsyncAPI 2.6/3.0 adapter compiles its documented WebSocket subset into this same source and plan
+type; it does not introduce another executor. Planning never performs DNS, TLS, authentication, or
+network access.
 
 The equivalent contract fixtures at
 [`fixtures/websocket/session.json`](../../fixtures/websocket/session.json) and

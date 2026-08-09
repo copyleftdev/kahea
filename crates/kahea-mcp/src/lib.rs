@@ -11,12 +11,14 @@ use kahea_exec::{
     InvocationResult, InvokeOptions, WebSocketConnectResult, execute_websocket, invoke,
 };
 use kahea_ingest::{
-    inspect_source, load_source, parse_data_document, read_source_artifact, resolve_operation,
+    inspect_asyncapi, inspect_source, is_asyncapi, load_source, parse_data_document,
+    read_source_artifact, resolve_operation,
 };
 use kahea_plan::{
-    PlanOptions, ProjectConfiguration, build_plan_with_configuration,
-    build_websocket_plan_with_configuration, inspect_websocket_session, is_websocket_session,
-    load_plan, load_websocket_plan, parse_explicit_field, store_plan, store_websocket_plan,
+    PlanOptions, ProjectConfiguration, build_asyncapi_websocket_plan_with_configuration,
+    build_plan_with_configuration, build_websocket_plan_with_configuration,
+    inspect_websocket_session, is_websocket_session, load_plan, load_websocket_plan,
+    parse_explicit_field, store_plan, store_websocket_plan,
 };
 use kahea_workflow::{
     build_workflow_plan, inspect_workflows, invoke_workflow, is_arazzo, load_workflow_plan,
@@ -97,9 +99,9 @@ fn tools() -> Value {
     json!([
         {
             "name": "kahea_inspect",
-            "description": "Parse a local API, workflow, or finite WebSocket session artifact and return a compact deterministic operation index. Performs no network access.",
+            "description": "Parse a local API, workflow, direct finite WebSocket session, or supported AsyncAPI WebSocket artifact and return a compact deterministic operation index. Performs no network access.",
             "inputSchema": object_schema(json!({
-                "source": {"type":"string","description":"Path to a local OpenAPI, Arazzo, imported request, or finite WebSocket session JSON/YAML artifact."},
+                "source": {"type":"string","description":"Path to a local OpenAPI, Arazzo, imported request, direct finite WebSocket session, or AsyncAPI 2.6/3.0 JSON/YAML artifact."},
                 "match": {"type":"string","description":"Optional case-insensitive operation, path, or WebSocket target filter."},
                 "limit": {"type":"integer","minimum":1,"maximum":1000},
                 "cursor": {"type":"integer","minimum":0}
@@ -109,9 +111,9 @@ fn tools() -> Value {
         },
         {
             "name": "kahea_plan",
-            "description": "Persist one deterministic sealed HTTP, workflow, conformance, or finite WebSocket plan. WebSocket target, auth reference, ordered actions, checks, and limits come only from the source. Performs no DNS or network access.",
+            "description": "Persist one deterministic sealed HTTP, workflow, conformance, direct WebSocket, or AsyncAPI-derived WebSocket plan. AsyncAPI message alternatives require an explicit indexed selector. Performs no DNS or network access.",
             "inputSchema": object_schema(json!({
-                "source":{"type":"string","description":"Path to a local source artifact. Direct finite WebSocket sessions use kind websocket-session and version 1."},
+                "source":{"type":"string","description":"Path to a local source artifact. WebSockets accept direct session version 1 or the documented AsyncAPI 2.6/3.0 subset."},
                 "operation":{"type":"string","description":"Operation identifier or deterministic operation handle returned by kahea_inspect."},
                 "input":{}, "set":{"type":"array","items":{"type":"string"}},
                 "server":{"type":"string"}, "auth":{"type":"string"},
@@ -214,6 +216,15 @@ fn tool_inspect(arguments: &Value) -> Result<Value, McpError> {
             cursor,
         )
         .map_err(operation_error)?
+    } else if raw.as_ref().is_some_and(is_asyncapi) {
+        inspect_asyncapi(
+            &path,
+            &bytes,
+            arguments.get("match").and_then(Value::as_str),
+            limit,
+            cursor,
+        )
+        .map_err(operation_error)?
     } else if raw.as_ref().is_some_and(is_arazzo) {
         inspect_workflows(
             raw.as_ref().expect("checked"),
@@ -290,6 +301,34 @@ fn tool_plan(arguments: &Value) -> Result<Value, McpError> {
                 "WebSocket operation {operation:?} was not found"
             )));
         }
+        store_websocket_plan(&store, &plan).map_err(operation_error)?;
+        return serde_json::to_value(plan).map_err(serialization_error);
+    }
+    if is_asyncapi(&raw) {
+        if arguments.get("input").is_some()
+            || optional_string(arguments, "content_type").is_some()
+            || !string_array(arguments, "checks")?.is_empty()
+            || arguments.get("conformance").is_some()
+        {
+            return Err(McpError::Invalid(
+                "AsyncAPI WebSocket plans accept only server, auth SCHEME=PROFILE, and set server.NAME/channel.NAME inputs".into(),
+            ));
+        }
+        let plan = build_asyncapi_websocket_plan_with_configuration(
+            &path,
+            &bytes,
+            required_string(arguments, "operation")?,
+            PlanOptions {
+                server: optional_string(arguments, "server"),
+                auth: optional_string(arguments, "auth"),
+                content_type: None,
+                input: None,
+                explicit,
+                checks: Vec::new(),
+            },
+            &configuration,
+        )
+        .map_err(operation_error)?;
         store_websocket_plan(&store, &plan).map_err(operation_error)?;
         return serde_json::to_value(plan).map_err(serialization_error);
     }
@@ -731,6 +770,38 @@ mod tests {
         let response = dispatch(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":MCP_VERSION}})).unwrap();
         assert_eq!(response["result"]["protocolVersion"], MCP_VERSION);
         assert!(response["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn asyncapi_tools_share_the_canonical_websocket_plan_path() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/asyncapi/session-3.0.json");
+        let inspected = tool_inspect(&json!({"source":source,"limit":50})).unwrap();
+        let selected = inspected["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation[3] == "watchBuilds#Started-1")
+            .unwrap()[0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let store = std::env::temp_dir().join(format!("kahea-mcp-asyncapi-{}", std::process::id()));
+        let planned = tool_plan(&json!({
+            "source": source,
+            "operation": selected,
+            "set": ["channel.room=ci"],
+            "store": store.display().to_string(),
+        }))
+        .unwrap();
+        assert_eq!(planned["kind"], "websocket-plan");
+        assert_eq!(planned["operation"], selected);
+        assert_eq!(planned["target"], "wss://socket.example.test/v1/events/ci");
+        assert_eq!(
+            planned["source_fingerprints"],
+            inspected["source_fingerprints"]
+        );
+        std::fs::remove_dir_all(store).unwrap();
     }
 
     #[test]

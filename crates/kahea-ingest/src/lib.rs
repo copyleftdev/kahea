@@ -1,6 +1,12 @@
 //! Deterministic source ingestion behind `kahea-core` public types.
 
+mod asyncapi;
 mod imports;
+
+pub use asyncapi::{
+    AsyncApiOperation, AsyncApiSource, compile_asyncapi_websocket, inspect_asyncapi, is_asyncapi,
+    load_asyncapi, resolve_asyncapi_operation,
+};
 
 use kahea_core::{
     AbsentCapability, DiagnosticSeverity, OperationIndexEnvelope, OperationSummary, PROTOCOL,
@@ -36,6 +42,8 @@ pub enum IngestError {
     UnknownOperation(String),
     #[error("operation selector {0:?} is ambiguous")]
     AmbiguousOperation(String),
+    #[error("invalid AsyncAPI source: {0}")]
+    InvalidAsyncApi(String),
 }
 
 /// Read a single source file or deterministically bundle a Postman Collection
