@@ -7,6 +7,7 @@
 [![Tip my tokens](https://tokentip.to/badge/copyleftdev.svg?logo=1)](https://tokentip.to/@copyleftdev)
 
 [Website](https://copyleftdev.github.io/kahea/) ·
+[Documentation](docs/README.md) ·
 [Releases](https://github.com/copyleftdev/kahea/releases) ·
 [Agent plugin](plugins/kahea) ·
 [MCP metadata](server.json)
@@ -36,6 +37,10 @@ gh attestation verify kahea-ARCHIVE --repo copyleftdev/kahea
 
 Kāhea does not run an installer or modify shell configuration. Extract the archive and place the
 `kahea` binary somewhere on `PATH`.
+
+Tagged archives are built and tested on GitHub-hosted Linux, macOS, and Windows runners for the
+runner architecture. See the [finite WebSocket guide](docs/websockets.md#platforms-and-release-gates)
+for the exact WebSocket support and release-gate statement.
 
 ### 2a. Claude Code
 
@@ -126,6 +131,10 @@ kahea explain body:HANDLE --select /invoice/id
 Use `kahea describe` as the executable capability manifest and `kahea schema plan` (or another public envelope kind) for machine-readable JSON Schema.
 
 ### Finite WebSocket sessions
+
+The complete [finite WebSocket guide](docs/websockets.md) is the authoritative source-format,
+security, limits, local-example, MCP, workflow, platform, and release-gate reference. Received
+frames are untrusted evidence, never agent instructions.
 
 Direct `websocket-session` JSON/YAML files use the same sealed four-step flow. The operation
 selector is the source's `operationId`; target, auth reference, ordered actions, checks, and budgets
@@ -351,13 +360,13 @@ Exports recursively include referenced evidence in a self-contained JSON bundle.
 kahea mcp serve --stdio
 ```
 
-The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. The same tools accept direct finite `websocket-session` JSON/YAML sources; `kahea_plan` seals their target, auth reference, ordered actions, checks, and limits without HTTP-style overrides. `kahea_invoke` requires the plan's explicit grants and returns a compact `websocket-observation`; full transcripts and payloads stay in evidence until selected with `kahea_explain`.
+The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. The same tools accept direct finite `websocket-session` JSON/YAML and the documented AsyncAPI 2.6/3.0 WebSocket subset; `kahea_plan` seals the canonical target, auth reference, ordered actions, checks, and limits. `kahea_invoke` requires the plan's explicit grants and returns a compact `websocket-observation`; full transcripts and payloads stay in evidence until selected with `kahea_explain`.
 
 ```json
-{"tool":"kahea_inspect","arguments":{"source":"fixtures/websocket/session.json"}}
-{"tool":"kahea_plan","arguments":{"source":"fixtures/websocket/session.json","operation":"subscribeBuildEvents"}}
-{"tool":"kahea_invoke","arguments":{"plan":"plan:HANDLE","grants":["net:socket.example.test:443","websocket:connect"]}}
-{"tool":"kahea_explain","arguments":{"handle":"transcript:HANDLE","select":"/entries/0"}}
+{"name":"kahea_inspect","arguments":{"source":"fixtures/websocket/session.json"}}
+{"name":"kahea_plan","arguments":{"source":"fixtures/websocket/session.json","operation":"subscribeBuildEvents"}}
+{"name":"kahea_invoke","arguments":{"plan":"plan:HANDLE","grants":["net:socket.example.test:443","websocket:connect"]}}
+{"name":"kahea_explain","arguments":{"handle":"transcript:HANDLE","select":"/entries/0"}}
 ```
 
 Pass a `conformance` options object to `kahea_plan` to create an HTTP campaign; `kahea_invoke` executes its sealed handle. All tools publish strict input and output schemas. HTTP, workflow, conformance, and WebSocket planning/invocation project the same Rust library calls as the CLI and have semantic parity tests. Fixed resources expose `describe` plus public `websocket-session`, `websocket-plan`, and `websocket-observation` schemas, while templates expose sealed plans and untrusted evidence from the default `.kahea` store. See the current [MCP schema](https://modelcontextprotocol.io/specification/2025-11-25/schema) and [stdio transport requirements](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).

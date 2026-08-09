@@ -33,6 +33,9 @@ done
 grep -F "io.github.copyleftdev/kahea" README.md >/dev/null
 grep -F "io.github.copyleftdev/kahea" site/index.html >/dev/null
 grep -F "https://copyleftdev.github.io/kahea/" README.md >/dev/null
+grep -F "finite WebSocket guide" README.md >/dev/null
+grep -F "docs/websockets.md" site/index.html >/dev/null
+grep -F "Finite WebSockets" site/index.html >/dev/null
 
 if grep -E 'background-clip:[[:space:]]*text|border-(left|right):[[:space:]]*[2-9]' site/styles.css >/dev/null; then
   echo "Site contains a prohibited visual pattern" >&2

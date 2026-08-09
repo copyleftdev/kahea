@@ -1219,8 +1219,24 @@ impl DescribeEnvelope {
                 "policy.allowed_hosts".into(),
                 "policy.denied_hosts".into(),
                 "policy.max_request_bytes".into(),
+                "policy.require_production_write_approval".into(),
                 "policy.sensitive_headers".into(),
                 "policy.redact_response_json_pointers".into(),
+                "policy.websocket.allowed_origins".into(),
+                "policy.websocket.allowed_subprotocols".into(),
+                "policy.websocket.max_limits.connect_timeout_ms".into(),
+                "policy.websocket.max_limits.action_timeout_ms".into(),
+                "policy.websocket.max_limits.idle_timeout_ms".into(),
+                "policy.websocket.max_limits.close_timeout_ms".into(),
+                "policy.websocket.max_limits.total_timeout_ms".into(),
+                "policy.websocket.max_limits.max_frame_bytes".into(),
+                "policy.websocket.max_limits.max_message_bytes".into(),
+                "policy.websocket.max_limits.max_inbound_frames".into(),
+                "policy.websocket.max_limits.max_outbound_frames".into(),
+                "policy.websocket.max_limits.max_inbound_messages".into(),
+                "policy.websocket.max_limits.max_outbound_messages".into(),
+                "policy.websocket.max_limits.max_inbound_bytes".into(),
+                "policy.websocket.max_limits.max_outbound_bytes".into(),
                 "defaults.auth".into(),
                 "auth".into(),
             ],
@@ -1337,6 +1353,33 @@ mod tests {
             let feature = &described.features[name];
             assert!(feature.available);
             assert_eq!(feature.release, release);
+        }
+        for format in [
+            "websocket-session-1-json-yaml",
+            "asyncapi-2.6-json",
+            "asyncapi-2.6-yaml",
+            "asyncapi-3.0-json",
+            "asyncapi-3.0-yaml",
+        ] {
+            assert!(described.formats.iter().any(|value| value == format));
+        }
+        for kind in ["websocket-plan", "websocket-observation"] {
+            assert!(described.output_kinds.iter().any(|value| value == kind));
+        }
+        for key in [
+            "policy.websocket.allowed_origins",
+            "policy.websocket.allowed_subprotocols",
+            "policy.websocket.max_limits.connect_timeout_ms",
+            "policy.websocket.max_limits.total_timeout_ms",
+            "policy.websocket.max_limits.max_inbound_bytes",
+            "policy.websocket.max_limits.max_outbound_bytes",
+        ] {
+            assert!(
+                described
+                    .configuration_keys
+                    .iter()
+                    .any(|value| value == key)
+            );
         }
         for (name, release) in [
             ("websockets", "release-5"),

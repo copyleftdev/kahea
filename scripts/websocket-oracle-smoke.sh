@@ -88,6 +88,18 @@ jq -n --arg url "$url" '{
   || fail "oracle session planning failed"
 plan=$(jq -er '.id' "$run_root/plan.json") || fail "plan handle is missing"
 jq -r '.required_grants[]' "$run_root/plan.json" >"$run_root/grants.txt"
+jq -e '
+  .kind == "websocket-plan" and
+  (.target | startswith("ws://127.0.0.1:"))
+' "$run_root/plan.json" >/dev/null || fail "sealed plan target is invalid"
+jq -e '
+  (.required_grants | length) == 4 and
+  (.required_grants | contains(["net-cidr:127.0.0.1/32", "net-insecure-websocket", "websocket:connect"])) and
+  any(.required_grants[]; startswith("net:127.0.0.1:"))
+' "$run_root/plan.json" >/dev/null || fail "sealed plan grants are not exact"
+
+echo "Sealed WebSocket plan and exact grants:"
+jq '{id,target,risk,required_grants,secret_refs,limits,actions}' "$run_root/plan.json"
 
 set -- "$kahea" invoke "$plan" --store "$store"
 while IFS= read -r grant; do
@@ -97,6 +109,11 @@ done <"$run_root/grants.txt"
   || fail "oracle session invocation failed"
 jq -e '.kind == "websocket-observation" and .exit == 0 and .terminal_cause == "completed"' "$run_root/observation.json" >/dev/null \
   || fail "client observation is not successful"
+transcript=$(jq -er '.transcript' "$run_root/observation.json") || fail "transcript handle is missing"
+"$kahea" explain "$transcript" --store "$store" --select /entries/0 >"$run_root/explanation.json" \
+  || fail "bounded transcript explanation failed"
+jq -e '.kind == "explanation" and .selector == "/entries/0" and .truncated == false' "$run_root/explanation.json" >/dev/null \
+  || fail "bounded transcript explanation is invalid"
 
 attempts=0
 while kill -0 "$server_pid" 2>/dev/null && [ "$attempts" -lt 100 ]; do

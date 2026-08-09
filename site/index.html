@@ -62,8 +62,8 @@
           <em>Exact execution.</em>
         </h1>
         <p class="hero-copy reveal">
-          Kāhea turns API descriptions and captured requests into sealed plans, exact grants,
-          tested invocations, and evidence an agent cannot quietly rewrite.
+          Kāhea turns API descriptions, captured requests, workflows, and finite WebSocket sessions
+          into sealed plans, exact grants, tested invocations, and evidence an agent cannot quietly rewrite.
         </p>
         <div class="hero-actions reveal">
           <a class="button button-primary" href="#install-title">Choose an install path</a>
@@ -101,7 +101,7 @@
               <span class="story-number">01</span>
               <div>
                 <h3>Inspect</h3>
-                <p>Parse OpenAPI, Arazzo, Postman, HAR, cURL, and HTTP artifacts locally. No DNS. No request.</p>
+                <p>Parse OpenAPI, AsyncAPI WebSockets, Arazzo, Postman, HAR, cURL, and HTTP artifacts locally. No DNS. No request.</p>
                 <code>kahea inspect api.yaml --match invoice</code>
               </div>
             </li>
@@ -259,7 +259,12 @@ codex plugin add kahea@kahea</code></pre>
           <li>Exact grants</li>
           <li>Schema-aware tests</li>
           <li>Replayable evidence</li>
+          <li>Finite WebSockets</li>
         </ul>
+        <p class="proof-note">
+          WebSocket sessions are sealed, bounded, policy-gated, and treated as untrusted evidence.
+          <a href="https://github.com/copyleftdev/kahea/blob/main/docs/websockets.md">Read the security model <span aria-hidden="true">↗</span></a>
+        </p>
       </section>
 
       <section class="closing" aria-labelledby="closing-title">

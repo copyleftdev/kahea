@@ -5,12 +5,12 @@
     "name": "copyleftdev",
     "url": "https://github.com/copyleftdev"
   },
-  "description": "Agent-first API testing and deterministic invocation tools.",
+  "description": "Agent-first HTTP and finite WebSocket testing with deterministic invocation.",
   "plugins": [
     {
       "name": "kahea",
       "source": "./plugins/kahea",
-      "description": "Seal, test, and invoke APIs with exact capability grants.",
+      "description": "Seal, test, and invoke HTTP and finite WebSocket APIs with exact capability grants.",
       "version": "0.1.0",
       "author": {
         "name": "copyleftdev",
@@ -19,6 +19,8 @@
       "category": "development",
       "tags": [
         "openapi",
+        "asyncapi",
+        "websocket",
         "api-testing",
         "mcp",
         "ai-agents"
