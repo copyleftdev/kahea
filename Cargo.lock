@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "kahea"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "kahea-conformance",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-conformance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "kahea-core",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-evidence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "kahea-core",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "httparse",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-ingest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "kahea-core",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "kahea-conformance",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-plan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "kahea-core",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-test-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "kahea-workflow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "kahea-core",

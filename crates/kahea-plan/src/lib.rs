@@ -2423,7 +2423,7 @@ paths:
         assert!(first.verify_seal().unwrap());
         assert_eq!(
             first.fingerprint,
-            "b3:0d7e9d6f78000a79e8ab5d22f618e40f60d1d0f66ea47e1b03e7aba02fed8e42"
+            "b3:4a80e89d596c227191b9e8308e099555b316ea666d753ffa6b303e2effa80b16"
         );
         assert_eq!(first.target, "wss://socket.example.test/v1/events");
         assert_eq!(first.risk, kahea_core::RiskClass::Write);
