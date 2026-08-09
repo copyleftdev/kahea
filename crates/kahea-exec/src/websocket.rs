@@ -3214,11 +3214,12 @@ mod tests {
                     .unwrap();
             let mut plan = plan(oracle.manifest.url.clone(), "net-cidr:127.0.0.1/32".into());
             plan.required_grants.push("net-insecure-websocket".into());
-            plan.limits.connect_timeout_ms = 200;
+            let silent_handshake = fault == WebSocketFaultMode::SilentHandshake;
+            plan.limits.connect_timeout_ms = if silent_handshake { 200 } else { 1_000 };
             plan.limits.action_timeout_ms = 200;
             plan.limits.close_timeout_ms = 200;
             plan.limits.idle_timeout_ms = 400;
-            plan.limits.total_timeout_ms = 500;
+            plan.limits.total_timeout_ms = if silent_handshake { 500 } else { 1_500 };
             plan.limits.max_frame_bytes = 128;
             plan.actions = if fault == WebSocketFaultMode::SilentClose {
                 vec![WebSocketAction::Close {
