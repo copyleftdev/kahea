@@ -10,6 +10,7 @@ post-v1 extensions reviewable without rewriting that historical document.
 | Decision | Status | Tracking issue |
 |---|---|---|
 | [ADR-0001: Deterministic finite WebSocket sessions](0001-websocket-sessions.md) | Accepted | [#7](https://github.com/copyleftdev/kahea/issues/7) |
+| [ADR-0002: The MCP surface does not accept filesystem paths](0002-mcp-filesystem-boundary.md) | Accepted | [#32](https://github.com/copyleftdev/kahea/issues/32) |
 
 An accepted decision fixes user-visible semantics. Implementation issues may choose internal types
 and dependencies only within those boundaries. If implementation reveals that a boundary is not

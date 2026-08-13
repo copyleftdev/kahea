@@ -17,7 +17,10 @@ validating it, and coordinate disclosure after a fix is available. No bounty is 
 
 Kāhea treats API descriptions, configuration, DNS, redirects, remote responses, and inbound
 WebSocket frames as untrusted. Planning is no-network; invocation requires sealed plans and exact
-grants. Redirects and ambient proxies are disabled, resolved addresses are pinned after policy
+grants. On the MCP surface the store root and the configuration file are process arguments of
+`kahea mcp serve`, plan references are sealed handles confined to that store, and undeclared tool
+arguments are rejected; see
+[ADR-0002](docs/architecture/0002-mcp-filesystem-boundary.md). Redirects and ambient proxies are disabled, resolved addresses are pinned after policy
 evaluation, and secret material is resolved only at invocation. See the
 [finite WebSocket security model](docs/websockets.md#security-model) and limitations before
 deploying Kāhea with sensitive APIs.
