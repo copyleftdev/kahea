@@ -3247,8 +3247,10 @@ mod tests {
         let mut deadline_stream = DeadlineTcpStream::new(stream, deadline, None);
         let started = Instant::now();
         let mut buffer = [0_u8; 4];
-        let read = deadline_stream.read(&mut buffer).unwrap();
-        assert_eq!(&buffer[..read], b"late");
+        // read_exact, not read: a single read may legally return fewer bytes than the peer sent, and
+        // a short read would fail this test for a reason it is not about.
+        deadline_stream.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, b"late");
         assert!(
             started.elapsed() >= Duration::from_millis(100),
             "the read returned before the data could have arrived"
