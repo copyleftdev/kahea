@@ -2440,6 +2440,25 @@ impl DeadlineTcpStream {
         })
     }
 
+    /// Confirm a reported timeout against the clock before treating it as one.
+    ///
+    /// `SO_RCVTIMEO` expiry and a spurious `EAGAIN` arrive as the same error, and the platforms do
+    /// not agree on when each happens. Ending a session on the errno alone reports a deadline that
+    /// has not passed: the observation says the peer ran out of time when it had seconds left. Ask
+    /// the clock instead, and only stop when the deadline is genuinely gone.
+    ///
+    /// The pause bounds the retry: a socket that reports readiness it does not have would otherwise
+    /// spin until the deadline rather than wait for it.
+    fn await_deadline(&self) -> io::Result<()> {
+        let before = Instant::now();
+        self.remaining()?;
+        if before.elapsed() < Duration::from_millis(1) {
+            std::thread::sleep(Duration::from_millis(1));
+            self.remaining()?;
+        }
+        Ok(())
+    }
+
     fn note_activity(&self) -> io::Result<()> {
         self.deadline
             .lock()
@@ -2460,10 +2479,8 @@ impl Read for DeadlineTcpStream {
                     }
                     return Ok(read);
                 }
-                Err(error)
-                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
-                {
-                    self.remaining()?;
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.await_deadline()?;
                 }
                 Err(error) => return Err(error),
             }
@@ -2482,10 +2499,8 @@ impl Write for DeadlineTcpStream {
                     }
                     return Ok(written);
                 }
-                Err(error)
-                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
-                {
-                    self.remaining()?;
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.await_deadline()?;
                 }
                 Err(error) => return Err(error),
             }
@@ -2497,10 +2512,8 @@ impl Write for DeadlineTcpStream {
             self.stream.set_write_timeout(Some(self.remaining()?))?;
             match self.stream.flush().map_err(normalize_timeout) {
                 Ok(()) => return Ok(()),
-                Err(error)
-                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
-                {
-                    self.remaining()?;
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.await_deadline()?;
                 }
                 Err(error) => return Err(error),
             }
@@ -3145,6 +3158,40 @@ mod tests {
         remove_temporary_store(&root);
     }
 
+    /// A socket that reports "would block" before the deadline must not end the session.
+    ///
+    /// A non-blocking socket reports exactly what a spurious wakeup reports, so this reproduces the
+    /// condition deterministically rather than waiting for a platform to produce it: the read is
+    /// answered late, and the stream has to wait for it instead of calling the deadline elapsed.
+    #[test]
+    fn a_would_block_before_the_deadline_is_not_a_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(150));
+            stream.write_all(b"late").unwrap();
+            stream.flush().unwrap();
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        // Every read now answers WouldBlock immediately until the data lands.
+        stream.set_nonblocking(true).unwrap();
+        let deadline = Arc::new(Mutex::new(DeadlineState::fixed(
+            Instant::now() + Duration::from_secs(5),
+            WebSocketTerminalCause::ActionTimeout,
+        )));
+        let mut deadline_stream = DeadlineTcpStream::new(stream, deadline, None);
+        let started = Instant::now();
+        let mut buffer = [0_u8; 4];
+        let read = deadline_stream.read(&mut buffer).unwrap();
+        assert_eq!(&buffer[..read], b"late");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "the read returned before the data could have arrived"
+        );
+        server.join().unwrap();
+    }
+
     #[test]
     fn controlled_oracle_is_seeded_scripted_bounded_and_tls_capable() {
         let mut scenario = generate_websocket_scenario(0x51_0c_e7);
@@ -3164,11 +3211,17 @@ mod tests {
         else {
             panic!("seeded oracle must produce a terminal observation")
         };
-        assert_eq!(observation.exit, 0);
+        // Assert the cause before the exit code: the cause names which deadline or failure ended
+        // the session, and the exit code only says that one did. A bare `exit 0 != 3` tells an
+        // investigator nothing about where to look.
         assert_eq!(
             observation.terminal_cause,
-            WebSocketTerminalCause::Completed
+            WebSocketTerminalCause::Completed,
+            "seeded oracle ended early: exit={} counters={:?}",
+            observation.exit,
+            observation.counters
         );
+        assert_eq!(observation.exit, 0);
         assert_eq!(observation.negotiated_subprotocol, scenario.subprotocol);
         let oracle_observation = oracle.wait().unwrap();
         assert_eq!(oracle_observation.seed, scenario.seed);
