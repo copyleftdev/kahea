@@ -1,6 +1,6 @@
 {
   "name": "kahea",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Deterministic HTTP and finite WebSocket planning, testing, and policy-gated execution for AI agents.",
   "author": {
     "name": "copyleftdev",
