@@ -25,6 +25,7 @@ use kahea_workflow::{
     store_workflow_plan,
 };
 use serde_json::{Value, json};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -53,31 +54,54 @@ pub enum McpError {
 /// policy fingerprint its plans are measured against.
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
-    pub store: PathBuf,
-    pub config: Option<PathBuf>,
+    store: PathBuf,
+    config: Option<PathBuf>,
+    configuration: OnceCell<ProjectConfiguration>,
 }
 
 impl Default for ServerOptions {
     fn default() -> Self {
-        Self {
-            store: PathBuf::from(DEFAULT_STORE),
-            config: None,
-        }
+        Self::new(PathBuf::from(DEFAULT_STORE), None)
     }
 }
 
 impl ServerOptions {
-    fn configuration(&self) -> Result<ProjectConfiguration, McpError> {
+    pub fn new(store: PathBuf, config: Option<PathBuf>) -> Self {
+        Self {
+            store,
+            config,
+            configuration: OnceCell::new(),
+        }
+    }
+
+    /// Load the configuration once, so a mistake is reported to the operator who made it.
+    ///
+    /// Callers report this at startup. Without it a bad `--config` produces one failure per tool
+    /// call, addressed to an agent that cannot fix it.
+    pub fn validate(&self) -> Result<(), McpError> {
+        self.configuration().map(|_| ())
+    }
+
+    /// The policy this process measures every plan against, read once and held.
+    ///
+    /// Re-reading per call would leave the trust anchor mutable for the process lifetime: anything
+    /// able to write inside the store could widen `allowed_hosts` between a plan and its
+    /// invocation, and both fingerprints would still agree. One process, one policy.
+    fn configuration(&self) -> Result<&ProjectConfiguration, McpError> {
+        if let Some(configuration) = self.configuration.get() {
+            return Ok(configuration);
+        }
         let path = self.config.clone().or_else(|| {
             let default = self.store.join("config.toml");
             default.exists().then_some(default)
         });
-        Ok(path
+        let loaded = path
             .as_deref()
             .map(ProjectConfiguration::load)
             .transpose()
             .map_err(operation_error)?
-            .unwrap_or_default())
+            .unwrap_or_default();
+        Ok(self.configuration.get_or_init(|| loaded))
     }
 
     fn evidence(&self) -> Result<EvidenceStore, McpError> {
@@ -363,7 +387,7 @@ fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpErr
                 "WebSocket sessions seal target, auth, actions, checks, and payloads in the source; HTTP and conformance plan overrides are not accepted".into(),
             ));
         }
-        let plan = build_websocket_plan_with_configuration(&path, &bytes, &configuration)
+        let plan = build_websocket_plan_with_configuration(&path, &bytes, configuration)
             .map_err(operation_error)?;
         let operation = required_string(arguments, "operation")?;
         let operation_id = raw
@@ -400,7 +424,7 @@ fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpErr
                 explicit,
                 checks: Vec::new(),
             },
-            &configuration,
+            configuration,
         )
         .map_err(operation_error)?;
         store_websocket_plan(&store, &plan).map_err(operation_error)?;
@@ -425,7 +449,7 @@ fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpErr
             optional_string(arguments, "auth"),
             optional_string(arguments, "server"),
             string_array(arguments, "checks")?,
-            &configuration,
+            configuration,
         )
         .map_err(operation_error)?;
         store_workflow_plan(&store, &plan).map_err(operation_error)?;
@@ -480,7 +504,7 @@ fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpErr
                     checks: string_array(arguments, "checks")?,
                 },
             },
-            &configuration,
+            configuration,
         )
         .map_err(operation_error)?;
         store_conformance_plan(&store, &campaign, &requests).map_err(operation_error)?;
@@ -497,7 +521,7 @@ fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpErr
             explicit,
             checks: string_array(arguments, "checks")?,
         },
-        &configuration,
+        configuration,
     )
     .map_err(operation_error)?;
     store_plan(&store, &plan).map_err(operation_error)?;
@@ -506,8 +530,10 @@ fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpErr
 
 fn tool_invoke(options: &ServerOptions, arguments: &Value) -> Result<Value, McpError> {
     let store_root = options.store.clone();
-    let plan_reference = required_string(arguments, "plan")?;
-    options.confined_plan_path(plan_reference)?;
+    let plan_path = options.confined_plan_path(required_string(arguments, "plan")?)?;
+    // Every loader below resolves this exact path rather than the reference, so the file that was
+    // confined is the file that is read.
+    let plan_reference = plan_path.to_str().ok_or_else(plan_load_error)?;
     let secrets = resolve_secret_env(arguments.get("secret_env"))?;
     let configuration = options.configuration()?;
     let evidence = options.evidence()?;
@@ -518,7 +544,7 @@ fn tool_invoke(options: &ServerOptions, arguments: &Value) -> Result<Value, McpE
         configuration.policy_fingerprint()
     }
     .map_err(operation_error)?;
-    let options = InvokeOptions {
+    let invoke_options = InvokeOptions {
         grants: string_array(arguments, "grants")?
             .into_iter()
             .collect::<BTreeSet<_>>(),
@@ -544,7 +570,8 @@ fn tool_invoke(options: &ServerOptions, arguments: &Value) -> Result<Value, McpE
     if plan_kind.as_deref() == Some("websocket-plan") {
         let plan =
             load_websocket_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
-        let result = execute_websocket(&plan, &options, &evidence).map_err(operation_error)?;
+        let result =
+            execute_websocket(&plan, &invoke_options, &evidence).map_err(operation_error)?;
         return match result {
             WebSocketConnectResult::Observation(observation) => serde_json::to_value(observation),
             WebSocketConnectResult::Denied(denial) => serde_json::to_value(denial),
@@ -559,19 +586,25 @@ fn tool_invoke(options: &ServerOptions, arguments: &Value) -> Result<Value, McpE
     if plan_kind.as_deref() == Some("conformance-plan") {
         let plan =
             load_conformance_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
-        let observation =
-            invoke_conformance(&plan, &options, &store_root, &evidence).map_err(operation_error)?;
+        let observation = invoke_conformance(&plan, &invoke_options, &store_root, &evidence)
+            .map_err(operation_error)?;
         return serde_json::to_value(observation).map_err(serialization_error);
     }
     if plan_kind.as_deref() == Some("workflow-plan") {
         let plan =
             load_workflow_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
-        let observation = invoke_workflow(&plan, &options, &configuration, &store_root, &evidence)
-            .map_err(operation_error)?;
+        let observation = invoke_workflow(
+            &plan,
+            &invoke_options,
+            configuration,
+            &store_root,
+            &evidence,
+        )
+        .map_err(operation_error)?;
         return serde_json::to_value(observation).map_err(serialization_error);
     }
     let plan = load_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
-    let result = invoke(&plan, &options, &evidence).map_err(operation_error)?;
+    let result = invoke(&plan, &invoke_options, &evidence).map_err(operation_error)?;
     match result {
         InvocationResult::Observation(value) => serde_json::to_value(value),
         InvocationResult::Denied(value) => serde_json::to_value(value),
@@ -857,16 +890,17 @@ mod tests {
         "version = 1\n\n[policy]\nallowed_hosts = [\"nothing.example.test\"]\n";
 
     fn temporary_store(label: &str) -> ServerOptions {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let store = std::env::temp_dir().join(format!(
-            "kahea-mcp-{label}-{}-{:?}",
+            "kahea-mcp-{label}-{}-{:?}-{nonce}",
             std::process::id(),
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&store).unwrap();
-        ServerOptions {
-            store,
-            config: None,
-        }
+        ServerOptions::new(store, None)
     }
 
     fn asyncapi_fixture() -> PathBuf {
@@ -950,13 +984,13 @@ mod tests {
                 .contains("outside the configured allowlist")
         );
 
-        let explicit = temporary_store("config-explicit");
-        let path = explicit.store.join("named.toml");
+        let named = temporary_store("config-explicit");
+        let path = named.store.join("named.toml");
         std::fs::write(&path, CONFIGURATION_DENYING_EVERY_HOST).unwrap();
-        let explicit = ServerOptions {
-            config: Some(path),
-            ..explicit
-        };
+        let explicit = ServerOptions::new(named.store.clone(), Some(path));
+        explicit
+            .validate()
+            .expect("a readable configuration validates");
         let denied = tool_plan(&explicit, &arguments).expect_err("named configuration applies");
         assert!(
             denied
@@ -964,15 +998,41 @@ mod tests {
                 .contains("outside the configured allowlist")
         );
 
-        let missing = ServerOptions {
-            config: Some(default_store.store.join("absent.toml")),
-            ..temporary_store("config-missing")
-        };
+        let absent = temporary_store("config-missing");
+        let missing =
+            ServerOptions::new(absent.store.clone(), Some(absent.store.join("absent.toml")));
+        missing
+            .validate()
+            .expect_err("a named configuration must exist");
         tool_plan(&missing, &arguments).expect_err("a named configuration must exist");
 
-        for options in [default_store, store_config, explicit, missing] {
-            let _ = std::fs::remove_dir_all(options.store);
+        for store in [default_store, store_config, named, absent] {
+            let _ = std::fs::remove_dir_all(store.store);
         }
+    }
+
+    #[test]
+    fn the_policy_is_fixed_for_the_life_of_the_process() {
+        let billing =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/billing.openapi.yaml");
+        let arguments = json!({
+            "source": billing,
+            "operation": "createInvoice",
+            "input": {"customer_id":"cus_01KAHEA","amount":125.5},
+        });
+        let options = temporary_store("config-frozen");
+        options.validate().expect("no configuration is valid");
+        tool_plan(&options, &arguments).expect("the empty policy allows this host");
+
+        std::fs::write(
+            options.store.join("config.toml"),
+            CONFIGURATION_DENYING_EVERY_HOST,
+        )
+        .unwrap();
+        tool_plan(&options, &arguments)
+            .expect("a configuration written after startup does not take effect");
+
+        std::fs::remove_dir_all(options.store).unwrap();
     }
 
     #[test]

@@ -361,10 +361,12 @@ kahea mcp serve --stdio
 kahea mcp serve --stdio --store .kahea-local --config .kahea-local/config.toml
 ```
 
-The store root and the configuration file are process arguments. No tool argument can relocate the
-store, name a different configuration, or reach a filesystem path: `kahea_invoke` accepts sealed plan
-handles only, and a call carrying an undeclared argument is rejected rather than silently ignored.
-The CLI keeps accepting plan file paths, because an operator types those.
+The store root and the configuration file are process arguments, read once at startup. No tool
+argument can relocate the store or name a different configuration, `kahea_invoke` accepts sealed plan
+handles rather than filesystem paths, and a call carrying an undeclared argument is rejected rather
+than silently ignored. Source ingestion is unchanged: `kahea_inspect` and `kahea_plan` still take a
+local `source` path, which is what they are for. The CLI keeps accepting plan file paths too, because
+an operator types those.
 
 The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. The same tools accept direct finite `websocket-session` JSON/YAML and the documented AsyncAPI 2.6/3.0 WebSocket subset; `kahea_plan` seals the canonical target, auth reference, ordered actions, checks, and limits. `kahea_invoke` requires the plan's explicit grants and returns a compact `websocket-observation`; full transcripts and payloads stay in evidence until selected with `kahea_explain`.
 

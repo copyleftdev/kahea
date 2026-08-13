@@ -42,6 +42,13 @@ The MCP surface treats the filesystem as server configuration, not as call data.
 `.kahea/config.toml`, so existing launch manifests are unaffected. Both are removed from every tool
 input schema. One server process has one store and one policy for its lifetime.
 
+The configuration is read once, at startup, and held. Reading it per call would leave the trust
+anchor mutable for the lifetime of the process: anything able to write inside the store could widen
+`allowed_hosts` between a plan and its invocation, and both fingerprints would still agree because
+both were derived from the widened file. Reading once also reports a bad `--config` to the operator
+who set it, instead of once per tool call to an agent that cannot fix it. The cost is that changing
+policy requires a restart.
+
 ### Plan references are handles
 
 `kahea_invoke` and the `kahea://plan/{handle}` resource accept `plan:`, `workflow-plan:`, and
@@ -80,10 +87,17 @@ Breaking, on the MCP surface only:
 Unchanged: every `kahea/k1` envelope, every handle, every schema name, the CLI, and the packaged
 launch manifests, which use the defaults.
 
-## Not decided here
+## Residual risk
 
-The plan seal remains a keyless digest. Confinement makes that adequate on this surface, because a
-reference can no longer name a file the store did not write, but it does not make the seal a
-statement of origin. Replacing it with a MAC under a store-local key — so `verify_seal` means "this
-store minted it" — is a separate decision with its own compatibility cost, and existing plans would
-not carry the new material.
+The plan seal remains a keyless digest, so it certifies integrity and not origin. Confinement narrows
+the reachable set to files inside the pinned store; it does not authenticate them. Anything able to
+write inside that store — the same other-tool assumption that motivates this decision — can mint a
+plan whose seal verifies. **The store is trusted.** An operator who points `--store` at a directory
+other software can write to gets no protection from this change.
+
+What confinement does buy is that the trusted set is now a directory an operator chose, rather than
+every path the process can read, and that the set is the same at check time and at load time.
+
+Replacing the digest with a MAC under a store-local key — so `verify_seal` means "this store minted
+it" — is the decision that would close the remaining gap. It is separate: it carries its own
+compatibility cost, and existing plans do not carry the new material.

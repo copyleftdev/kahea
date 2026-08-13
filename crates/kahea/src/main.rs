@@ -771,13 +771,17 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     exit: 2,
                 });
             }
-            kahea_mcp::serve_stdio(kahea_mcp::ServerOptions { store, config }).map_err(
-                |error| CliError {
-                    code: "mcp-server-failed",
-                    message: error.to_string(),
-                    exit: 2,
-                },
-            )?;
+            let options = kahea_mcp::ServerOptions::new(store, config);
+            options.validate().map_err(|error| CliError {
+                code: "invalid-configuration",
+                message: error.to_string(),
+                exit: 2,
+            })?;
+            kahea_mcp::serve_stdio(options).map_err(|error| CliError {
+                code: "mcp-server-failed",
+                message: error.to_string(),
+                exit: 2,
+            })?;
             Ok(0)
         }
     }

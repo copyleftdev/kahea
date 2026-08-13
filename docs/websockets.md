@@ -108,14 +108,22 @@ Any MCP client can start the same binary over stdio:
   "mcpServers": {
     "kahea": {
       "command": "kahea",
-      "args": ["mcp", "serve", "--stdio", "--store", ".kahea-local"]
+      "args": [
+        "mcp", "serve", "--stdio",
+        "--store", ".kahea-local",
+        "--config", ".kahea-local/config.toml"
+      ]
     }
   }
 }
 ```
 
-The store root is a process argument. Tool calls cannot relocate it, and `kahea_invoke` accepts only
-sealed plan handles, never filesystem paths.
+The store root and the configuration file are process arguments. `--config` defaults to
+`config.toml` inside the store when that file exists, and pass it explicitly to name a policy
+elsewhere; either way it is read once at startup, and a configuration that cannot be read or parsed
+stops the server instead of failing one tool call at a time. Tool calls cannot relocate the store or
+name a different configuration, and `kahea_invoke` accepts only sealed plan handles, never
+filesystem paths.
 
 Use the same order and review boundary through the four tools:
 
@@ -164,6 +172,8 @@ names only.
 
 - The store root and the configuration file are process arguments of `kahea mcp serve`. A tool call
   cannot relocate the store or choose the configuration whose policy fingerprint measures its plans.
+- The configuration is read once at startup and held for the process lifetime, so a write inside the
+  store cannot widen policy between a plan and its invocation. Changing policy means restarting.
 - `kahea_invoke` and the `kahea://plan/{handle}` resource accept sealed plan handles only. A handle
   resolves inside the pinned store or the call is denied before anything is read.
 - A tool call carrying an argument the tool does not declare is rejected, so a call written against
