@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-08-13
 
+- **Breaking (`kahea/k1`):** a close frame the plan does not accept is reported as
+  `expectation-failed` even when the peer resets the connection while the close is being
+  acknowledged. Previously that reset replaced the verdict with `io-failure`, so a server rejecting a
+  session with an unacceptable close code and hanging up was reported as a local I/O problem.
+  `io-failure` is now reported only when there is no verdict of its own to report
+  ([#34](https://github.com/copyleftdev/kahea/issues/34)).
 - **Breaking (MCP surface):** removed the `store` and `config` tool arguments. The store root and
   the configuration file are now process arguments of `kahea mcp serve --store/--config`, defaulting
   to the previous `.kahea` and `.kahea/config.toml`, so a tool call can no longer relocate the store
@@ -19,6 +25,10 @@
   requires restarting the server.
 - Recorded [ADR-0002](docs/architecture/0002-mcp-filesystem-boundary.md) and closed the reported
   `kahea_invoke.plan` to `fs::read` path ([#32](https://github.com/copyleftdev/kahea/issues/32)).
+- Removed a class of wall-clock test flakes that intermittently blocked required checks on all three
+  platforms: budgets a test does not assert are now generous, temporary stores are removed without
+  failing a passing test, and CI caps intra-binary test parallelism
+  ([#36](https://github.com/copyleftdev/kahea/issues/36)).
 
 ## 0.2.0 - 2026-08-09
 

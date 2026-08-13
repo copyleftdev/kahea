@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kahea",
   "display_name": "Kāhea",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Deterministic HTTP and WebSocket testing with policy-gated execution for AI agents.",
   "long_description": "Kāhea turns API descriptions, captured requests, workflows, and finite WebSocket sessions into sealed plans, invokes only with exact capability grants, and returns typed, replayable evidence.",
   "author": {
