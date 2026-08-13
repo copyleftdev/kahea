@@ -495,11 +495,11 @@ fn select_xml(data: &[u8], selector: &str) -> Result<Option<Value>, EvidenceErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kahea_test_server::remove_temporary_store;
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
 
     #[test]
     fn blobs_are_content_addressed_and_round_trip() {
-        let root = std::env::temp_dir().join(format!("kahea-evidence-{}", std::process::id()));
+        let root = temporary_store_path("evidence");
         remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let first = store
@@ -516,8 +516,7 @@ mod tests {
 
     #[test]
     fn explanation_supports_bounded_structured_selectors() {
-        let root =
-            std::env::temp_dir().join(format!("kahea-evidence-select-{}", std::process::id()));
+        let root = temporary_store_path("evidence-select");
         remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let json = store
@@ -562,10 +561,7 @@ mod tests {
 
     #[test]
     fn selectors_reject_oversized_missing_and_unsupported_access() {
-        let root = std::env::temp_dir().join(format!(
-            "kahea-evidence-selector-limits-{}",
-            std::process::id()
-        ));
+        let root = temporary_store_path("evidence-selector-limits");
         remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let json = store
@@ -600,8 +596,7 @@ mod tests {
 
     #[test]
     fn export_bundle_follows_evidence_handles() {
-        let root =
-            std::env::temp_dir().join(format!("kahea-evidence-export-{}", std::process::id()));
+        let root = temporary_store_path("evidence-export");
         remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let body = store

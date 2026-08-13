@@ -1,4 +1,4 @@
-use kahea_test_server::remove_temporary_store;
+use kahea_test_server::{remove_temporary_store, temporary_store_path};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tungstenite::Message;
 
 fn binary() -> PathBuf {
@@ -20,11 +19,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("kahea-cli-{name}-{nonce}"))
+    temporary_store_path(&format!("cli-{name}"))
 }
 
 fn output_json(arguments: &[&str]) -> Value {

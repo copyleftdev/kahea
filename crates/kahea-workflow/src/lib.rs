@@ -1976,19 +1976,15 @@ fn value_array(value: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kahea_test_server::remove_temporary_store;
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
     use tungstenite::Message;
 
     fn temporary_root(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("kahea-workflow-{label}-{nonce}"));
+        let root = temporary_store_path(&format!("workflow-{label}"));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -2055,11 +2051,7 @@ mod tests {
     fn two_step_workflow_resolves_output_into_a_sealed_subplan() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("kahea-workflow-{nonce}"));
+        let root = temporary_store_path("workflow");
         fs::create_dir_all(&root).unwrap();
         let openapi_path = root.join("api.yaml");
         fs::write(

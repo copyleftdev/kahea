@@ -16,7 +16,7 @@ use kahea_evidence::EvidenceStore;
 use kahea_exec::InvokeOptions;
 use kahea_ingest::{OpenApiSource, OperationDefinition, load_openapi, resolve_operation};
 use kahea_plan::ProjectConfiguration;
-use kahea_test_server::remove_temporary_store;
+use kahea_test_server::{remove_temporary_store, temporary_store_path};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -374,11 +374,7 @@ impl Drop for CookieServer {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("kahea-cookies-{name}-{nonce}"))
+    temporary_store_path(&format!("cookies-{name}"))
 }
 
 #[test]

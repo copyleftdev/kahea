@@ -11,24 +11,20 @@ use kahea_evidence::EvidenceStore;
 use kahea_exec::InvokeOptions;
 use kahea_ingest::{load_openapi, resolve_operation};
 use kahea_plan::ProjectConfiguration;
-use kahea_test_server::remove_temporary_store;
 use kahea_test_server::{
     Diagnostics, FaultMode, RunningServer, generate_scenario, openapi_document, start_server,
 };
+use kahea_test_server::{remove_temporary_store, temporary_store_path};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const SEED: u64 = 424242;
 const CASES: usize = 6;
 
 fn scratch(name: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("kahea-dynamic-{name}-{nonce}"))
+    temporary_store_path(&format!("dynamic-{name}"))
 }
 
 fn diagnostics(server: &RunningServer) -> Diagnostics {

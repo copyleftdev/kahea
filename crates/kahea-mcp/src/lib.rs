@@ -840,7 +840,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kahea_test_server::remove_temporary_store;
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
 
     #[test]
     fn exposes_exactly_four_operational_tools() {
@@ -891,15 +891,7 @@ mod tests {
         "version = 1\n\n[policy]\nallowed_hosts = [\"nothing.example.test\"]\n";
 
     fn temporary_store(label: &str) -> ServerOptions {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let store = std::env::temp_dir().join(format!(
-            "kahea-mcp-{label}-{}-{:?}-{nonce}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let store = temporary_store_path(&format!("mcp-{label}"));
         std::fs::create_dir_all(&store).unwrap();
         ServerOptions::new(store, None)
     }

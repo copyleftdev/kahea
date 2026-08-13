@@ -2525,11 +2525,11 @@ mod tests {
         PlannedAuth, PlannedHeader, RiskClass, WebSocketAction, WebSocketLimits,
         default_config_fingerprint, digest,
     };
-    use kahea_test_server::remove_temporary_store;
     use kahea_test_server::{
         WebSocketFaultMode, WebSocketOracleTransport, generate_websocket_scenario,
         start_websocket_oracle, start_websocket_oracle_on,
     };
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -2537,20 +2537,12 @@ mod tests {
     use std::net::{Ipv6Addr, TcpListener};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tungstenite::http::StatusCode;
     use tungstenite::protocol::frame::Frame;
     use tungstenite::protocol::frame::coding::{Data, OpCode};
 
     fn store() -> (std::path::PathBuf, EvidenceStore) {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "kahea-websocket-exec-{}-{nonce}",
-            std::process::id()
-        ));
+        let root = temporary_store_path("websocket-exec");
         let store = EvidenceStore::open(&root).unwrap();
         (root, store)
     }

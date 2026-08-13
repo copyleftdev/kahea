@@ -10,7 +10,7 @@ use kahea_evidence::EvidenceStore;
 use kahea_exec::InvokeOptions;
 use kahea_ingest::{OpenApiSource, OperationDefinition, load_openapi, resolve_operation};
 use kahea_plan::{PlanOptions, ProjectConfiguration};
-use kahea_test_server::remove_temporary_store;
+use kahea_test_server::{remove_temporary_store, temporary_store_path};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 fn fixture_spec() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,11 +55,7 @@ fn options(cases: usize, seed: u64, mode: ConformanceMode) -> ConformanceOptions
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("kahea-campaign-{name}-{nonce}"))
+    temporary_store_path(&format!("campaign-{name}"))
 }
 
 /// A single-request-per-connection loopback server that never blocks the test

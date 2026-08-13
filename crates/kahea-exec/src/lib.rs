@@ -1188,19 +1188,14 @@ fn unsafe_ipv6(address: Ipv6Addr) -> bool {
 mod tests {
     use super::*;
     use kahea_core::{PlannedAuth, RiskClass};
-    use kahea_test_server::remove_temporary_store;
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
     use std::fs;
     use std::io::{ErrorKind, Write};
     use std::net::TcpListener;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn store() -> (std::path::PathBuf, EvidenceStore) {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("kahea-exec-{}-{nonce}", std::process::id()));
+        let root = temporary_store_path("exec");
         let store = EvidenceStore::open(&root).unwrap();
         (root, store)
     }

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -23,6 +23,18 @@ use thiserror::Error;
 use url::Url;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// A temporary directory path no other test can be handed, whatever the clock does.
+///
+/// Tests run in parallel inside one binary. A path built from the process id and a timestamp is
+/// unique only if no two callers share a clock tick, and when that assumption fails both tests open
+/// the same store and the first to finish deletes it from under the second. The counter removes the
+/// assumption: uniqueness comes from the process, not from time.
+pub fn temporary_store_path(label: &str) -> std::path::PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("kahea-{label}-{}-{sequence}", std::process::id()))
+}
 
 /// Remove a directory a test created for itself, without failing the test if it cannot be removed.
 ///
