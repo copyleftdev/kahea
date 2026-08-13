@@ -1045,11 +1045,6 @@ fn read_expectation(
                         exit: 1,
                         close: Some(close),
                     }),
-                    ClosePrecedence::NotAcknowledged => Err(socket_error(
-                        connection,
-                        acknowledged.expect_err("only reached when the flush failed"),
-                        timeout_cause,
-                    )),
                 };
             }
             Message::Frame(frame) => {
@@ -1360,22 +1355,24 @@ fn sync_wire_counters(
 enum ClosePrecedence {
     Accepted,
     Rejected,
-    NotAcknowledged,
 }
 
 /// What to report when the peer's close frame has been read and acknowledging it may have failed.
 ///
-/// The verdict is settled the moment the frame is read; the acknowledgement is courtesy. A peer that
+/// The close frame decides, and only the close frame. Acknowledging it is courtesy: a peer that
 /// closes with our bytes still unread resets the connection, and that reset surfaces on the
-/// acknowledging write rather than on the read that already told us what happened. Reporting the I/O
-/// error would replace the diagnosis the operator needs — an unacceptable close code — with the
-/// failure to reply to it, and would do so only on the runs where the reset won the race. An I/O
-/// failure is reported only when there is no verdict of its own to report.
-const fn close_precedence(matched: bool, acknowledged: bool) -> ClosePrecedence {
-    match (matched, acknowledged) {
-        (false, _) => ClosePrecedence::Rejected,
-        (true, true) => ClosePrecedence::Accepted,
-        (true, false) => ClosePrecedence::NotAcknowledged,
+/// acknowledging write rather than on the read that already told us what happened.
+///
+/// `acknowledged` is a parameter and then ignored on purpose. An earlier version let a failed
+/// acknowledgement turn an accepted close into an I/O failure, which reported a session that met
+/// every expectation and received a close its plan accepted as though it had broken — on exactly the
+/// runs where the peer's reset won the race. Whether our reply landed is recorded in the transcript,
+/// where it belongs; it is not a verdict about the session.
+const fn close_precedence(matched: bool, _acknowledged: bool) -> ClosePrecedence {
+    if matched {
+        ClosePrecedence::Accepted
+    } else {
+        ClosePrecedence::Rejected
     }
 }
 
@@ -3208,6 +3205,50 @@ mod tests {
         remove_temporary_store(&root);
     }
 
+    /// A peer that resets right after an acceptable close still ran an acceptable session.
+    ///
+    /// The server sends its close and drops the socket without draining, which is what macOS turns
+    /// into a reset on the acknowledging write. Every expectation was met and the close code is one
+    /// the plan accepts, so the session completed.
+    #[test]
+    fn an_accepted_close_survives_a_peer_that_vanishes_before_the_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.actions = vec![WebSocketAction::ExpectClose {
+            codes: vec![1000],
+            reason: None,
+            timeout_ms: None,
+        }];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            socket
+                .write(Message::Frame(Frame::close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "".into(),
+                }))))
+                .unwrap();
+            socket.flush().unwrap();
+            drop(socket);
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("an accepted close must produce an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::Completed,
+            "exit={}",
+            observation.exit
+        );
+        assert_eq!(observation.exit, 0);
+        server.join().unwrap();
+        drop(store);
+        remove_temporary_store(&root);
+    }
+
     /// A signal is not a decision, and only the caller's flag can make an interruption one.
     ///
     /// `EINTR` and a cancelled session arrive as the same `ErrorKind::Interrupted`, and the code
@@ -4081,8 +4122,8 @@ mod tests {
         assert_eq!(close_precedence(true, true), ClosePrecedence::Accepted);
         assert_eq!(
             close_precedence(true, false),
-            ClosePrecedence::NotAcknowledged,
-            "with nothing to report about the close itself, the I/O failure is the result"
+            ClosePrecedence::Accepted,
+            "a peer that vanishes after an acceptable close still ran an acceptable session"
         );
         for acknowledged in [true, false] {
             assert_eq!(
