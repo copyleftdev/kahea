@@ -1014,29 +1014,33 @@ fn read_expectation(
                     payload: Some(reason.clone()),
                 });
                 account_automatic_control(plan, counters, close_payload_bytes(frame.as_ref()))?;
-                if let Err(error) = connection.socket.flush() {
-                    return Err(socket_error(connection, error, timeout_cause));
+                let acknowledged = connection.socket.flush();
+                if acknowledged.is_ok() {
+                    sync_wire_counters(connection, counters)?;
+                    transcript.push(TranscriptEntry {
+                        direction: "outbound",
+                        kind: "close",
+                        bytes: close_payload_bytes(frame.as_ref()),
+                        action_index: Some(action_index),
+                        check: "automatic",
+                        code: frame.as_ref().map(|frame| u16::from(frame.code)),
+                        payload_kind: Some(TranscriptPayloadKind::Text),
+                        payload: Some(reason),
+                    });
                 }
-                sync_wire_counters(connection, counters)?;
-                transcript.push(TranscriptEntry {
-                    direction: "outbound",
-                    kind: "close",
-                    bytes: close_payload_bytes(frame.as_ref()),
-                    action_index: Some(action_index),
-                    check: "automatic",
-                    code: frame.as_ref().map(|frame| u16::from(frame.code)),
-                    payload_kind: Some(TranscriptPayloadKind::Text),
-                    payload: Some(reason),
-                });
-                return if matched {
-                    Ok(Some(close))
-                } else {
-                    Err(SessionTerminal {
+                return match close_precedence(matched, acknowledged.is_ok()) {
+                    ClosePrecedence::Accepted => Ok(Some(close)),
+                    ClosePrecedence::Rejected => Err(SessionTerminal {
                         outcome: Outcome::Failed,
                         cause: WebSocketTerminalCause::ExpectationFailed,
                         exit: 1,
                         close: Some(close),
-                    })
+                    }),
+                    ClosePrecedence::NotAcknowledged => Err(socket_error(
+                        connection,
+                        acknowledged.expect_err("only reached when the flush failed"),
+                        timeout_cause,
+                    )),
                 };
             }
             Message::Frame(frame) => {
@@ -1341,6 +1345,29 @@ fn sync_wire_counters(
         });
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosePrecedence {
+    Accepted,
+    Rejected,
+    NotAcknowledged,
+}
+
+/// What to report when the peer's close frame has been read and acknowledging it may have failed.
+///
+/// The verdict is settled the moment the frame is read; the acknowledgement is courtesy. A peer that
+/// closes with our bytes still unread resets the connection, and that reset surfaces on the
+/// acknowledging write rather than on the read that already told us what happened. Reporting the I/O
+/// error would replace the diagnosis the operator needs — an unacceptable close code — with the
+/// failure to reply to it, and would do so only on the runs where the reset won the race. An I/O
+/// failure is reported only when there is no verdict of its own to report.
+const fn close_precedence(matched: bool, acknowledged: bool) -> ClosePrecedence {
+    match (matched, acknowledged) {
+        (false, _) => ClosePrecedence::Rejected,
+        (true, true) => ClosePrecedence::Accepted,
+        (true, false) => ClosePrecedence::NotAcknowledged,
+    }
 }
 
 fn socket_error(
@@ -3917,6 +3944,91 @@ mod tests {
         .unwrap();
         assert_eq!(duplicate.handle, duplicate_again.handle);
         assert_files_absent(&root, SECRET.as_bytes());
+        server.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The precedence rule itself, which is the part a socket test cannot pin down.
+    ///
+    /// Whether the acknowledging write fails depends on when the peer's reset lands, so the
+    /// interesting branch appears only on some runs and some platforms — that is exactly how this
+    /// arrived as a macOS-only CI flake. The truth table is deterministic even though the race is
+    /// not.
+    #[test]
+    fn a_close_verdict_outranks_a_failure_to_acknowledge_it() {
+        assert_eq!(close_precedence(true, true), ClosePrecedence::Accepted);
+        assert_eq!(
+            close_precedence(true, false),
+            ClosePrecedence::NotAcknowledged,
+            "with nothing to report about the close itself, the I/O failure is the result"
+        );
+        for acknowledged in [true, false] {
+            assert_eq!(
+                close_precedence(false, acknowledged),
+                ClosePrecedence::Rejected,
+                "an unacceptable close code is the diagnosis whether or not the reply landed"
+            );
+        }
+    }
+
+    /// End-to-end cover for the same path against a server that closes abruptly.
+    ///
+    /// This exercises the ordinary ordering rather than the reset; the branch where the
+    /// acknowledgement fails is covered by the truth table above, because forcing a reset portably
+    /// needs `SO_LINGER`, which is not stable.
+    #[test]
+    fn an_unacceptable_close_code_fails_the_expectation_when_the_peer_hangs_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.actions = vec![WebSocketAction::ExpectClose {
+            codes: vec![1000],
+            reason: None,
+            timeout_ms: None,
+        }];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let stream = accept_test_connection(&listener);
+            let raw = stream.try_clone().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            // 1005 is a reserved sentinel the plan cannot accept.
+            socket
+                .write(Message::Frame(Frame::close(Some(CloseFrame {
+                    code: CloseCode::from(1005),
+                    reason: "".into(),
+                }))))
+                .unwrap();
+            socket.flush().unwrap();
+            let mut pending = [0_u8; 1];
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match raw.peek(&mut pending) {
+                    Ok(0) => break,
+                    Ok(_) => break,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(_) => break,
+                }
+            }
+            drop(socket);
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("a reset close must still return an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::ExpectationFailed,
+            "the close code is the diagnosis, not the failure to acknowledge it"
+        );
+        assert_eq!(observation.exit, 1);
+        // 1005 never reaches the plan as itself: the client library rejects the reserved sentinel
+        // and reports the close as 1002, which is what the plan then declines.
+        assert_eq!(
+            observation.close.as_ref().map(|close| close.code),
+            Some(1002)
+        );
         server.join().unwrap();
         drop(store);
         fs::remove_dir_all(root).unwrap();
