@@ -840,6 +840,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kahea_test_server::remove_temporary_store;
 
     #[test]
     fn exposes_exactly_four_operational_tools() {
@@ -941,7 +942,7 @@ mod tests {
             planned["source_fingerprints"],
             inspected["source_fingerprints"]
         );
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]
@@ -955,7 +956,7 @@ mod tests {
         let value: Value = serde_json::from_str(text).unwrap();
         assert_eq!(value["id"], planned["id"]);
         assert_eq!(value["kind"], "websocket-plan");
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]
@@ -1007,7 +1008,7 @@ mod tests {
         tool_plan(&missing, &arguments).expect_err("a named configuration must exist");
 
         for store in [default_store, store_config, named, absent] {
-            let _ = std::fs::remove_dir_all(store.store);
+            remove_temporary_store(&store.store);
         }
     }
 
@@ -1032,7 +1033,7 @@ mod tests {
         tool_plan(&options, &arguments)
             .expect("a configuration written after startup does not take effect");
 
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]
@@ -1053,7 +1054,7 @@ mod tests {
         let denial = tool_invoke(&options, &json!({"plan": handle, "grants": []})).unwrap();
         assert_eq!(denial["kind"], "denial");
         assert_eq!(denial["plan"], planned["id"]);
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]
@@ -1103,7 +1104,7 @@ mod tests {
                 "{reference} produced {error}"
             );
         }
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]
@@ -1112,7 +1113,7 @@ mod tests {
         let error = read_resource(&options, &json!({"uri":"kahea://plan//etc/passwd"}))
             .expect_err("path resource");
         assert!(matches!(error, McpError::Invalid(_)));
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]
@@ -1127,7 +1128,7 @@ mod tests {
                 && !message.contains(options.store.to_str().unwrap()),
             "{message}"
         );
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[cfg(unix)]
@@ -1148,7 +1149,7 @@ mod tests {
             .expect_err("symlinked plan");
         assert!(matches!(error, McpError::Invalid(_)));
         std::fs::remove_file(outside).unwrap();
-        std::fs::remove_dir_all(options.store).unwrap();
+        remove_temporary_store(&options.store);
     }
 
     #[test]

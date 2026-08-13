@@ -1623,6 +1623,7 @@ fn safe_exec_reason(error: &ExecError) -> String {
 mod tests {
     use super::*;
     use kahea_ingest::{load_openapi, resolve_operation};
+    use kahea_test_server::remove_temporary_store;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -1796,7 +1797,7 @@ paths:
                 .fingerprint,
             campaign.fingerprint
         );
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1824,7 +1825,7 @@ paths:
             store_conformance_plan(&root, &campaign, &requests),
             Err(ConformanceError::InvalidCase(_))
         ));
-        let _ = fs::remove_dir_all(root);
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1854,7 +1855,7 @@ paths:
         );
         assert_eq!(observation.executed, 0);
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1889,7 +1890,7 @@ paths:
             Err(ConformanceError::InvalidCase(_))
         ));
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1938,7 +1939,7 @@ paths:
         assert_eq!(observation.exit, 4);
         assert!(matches!(observation.outcome, Outcome::Denied));
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1993,7 +1994,7 @@ paths:
                 .all(|case| case.reason == "transport failed")
         );
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2393,6 +2394,6 @@ paths:
         assert_eq!(observation.failed, 0);
         server.join().unwrap();
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 }

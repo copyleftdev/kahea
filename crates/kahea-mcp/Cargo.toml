@@ -20,3 +20,6 @@ kahea-plan = { path = "../kahea-plan" }
 kahea-workflow = { path = "../kahea-workflow" }
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+kahea-test-server = { path = "../kahea-test-server" }

@@ -21,4 +21,5 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+kahea-test-server = { path = "../kahea-test-server" }
 tungstenite.workspace = true

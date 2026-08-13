@@ -11,10 +11,10 @@ use kahea_evidence::EvidenceStore;
 use kahea_exec::InvokeOptions;
 use kahea_ingest::{load_openapi, resolve_operation};
 use kahea_plan::ProjectConfiguration;
+use kahea_test_server::remove_temporary_store;
 use kahea_test_server::{
     Diagnostics, FaultMode, RunningServer, generate_scenario, openapi_document, start_server,
 };
-use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -109,7 +109,7 @@ fn lifecycle(
     let snapshot = diagnostics(&server);
     server.stop().unwrap();
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
     (observations, snapshot)
 }
 

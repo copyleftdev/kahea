@@ -1,3 +1,4 @@
+use kahea_test_server::remove_temporary_store;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -45,11 +46,13 @@ fn websocket_source(port: u16, actions: Value, action_timeout_ms: u64) -> Value 
         "url": format!("ws://127.0.0.1:{port}/socket"),
         "actions": actions,
         "limits": {
-            "connect_timeout_ms": 500,
+            // Only `action_timeout_ms` is ever asserted, by the callers that pass a small one. The
+            // rest are generous so a loaded runner cannot end a successful session early.
+            "connect_timeout_ms": 10_000,
             "action_timeout_ms": action_timeout_ms,
-            "idle_timeout_ms": 500,
-            "close_timeout_ms": 500,
-            "total_timeout_ms": 2_000,
+            "idle_timeout_ms": 10_000,
+            "close_timeout_ms": 10_000,
+            "total_timeout_ms": 30_000,
             "max_frame_bytes": 65_536,
             "max_message_bytes": 65_536,
             "max_inbound_frames": 16,
@@ -227,7 +230,7 @@ fn cli_and_mcp_plans_are_semantically_identical() {
         }),
     );
     assert_eq!(response["result"]["structuredContent"], cli);
-    std::fs::remove_dir_all(store).unwrap();
+    remove_temporary_store(&store);
 }
 
 #[test]
@@ -293,7 +296,7 @@ fn websocket_mcp_lists_strict_tools_resources_and_matches_cli_planning() {
         &websocket_source(
             listener.local_addr().unwrap().port(),
             json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let cli_index = output_json(&["inspect", source.to_str().unwrap()]);
@@ -353,7 +356,7 @@ fn websocket_mcp_lists_strict_tools_resources_and_matches_cli_planning() {
             .contains("does not accept the argument \"store\"")
     );
     assert!(!root.join("elsewhere").exists());
-    std::fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -426,7 +429,7 @@ fn every_advertised_request_import_reaches_a_sealed_plan() {
             Some(body) => assert_eq!(plan["body"]["inline"], body, "wrong body for {name}"),
             None => assert!(plan["body"].is_null(), "unexpected body for {name}"),
         }
-        std::fs::remove_dir_all(store).unwrap();
+        remove_temporary_store(&store);
     }
 }
 
@@ -494,7 +497,7 @@ fn every_openapi_version_and_text_encoding_inspects_and_plans() {
             assert_eq!(plan["method"], "GET");
         }
     }
-    std::fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -519,7 +522,7 @@ fn arazzo_json_and_yaml_both_inspect_and_plan() {
         ]);
         assert_eq!(plan["kind"], "workflow-plan");
         assert_eq!(plan["steps"].as_array().unwrap().len(), 2);
-        std::fs::remove_dir_all(store).unwrap();
+        remove_temporary_store(&store);
     }
 }
 
@@ -567,8 +570,8 @@ fn mixed_arazzo_plan_exposes_sealed_websocket_steps_and_exact_aggregate_grants()
         }),
     );
     assert_eq!(mcp["result"]["structuredContent"], plan);
-    std::fs::remove_dir_all(store).unwrap();
-    std::fs::remove_dir_all(mcp_store).unwrap();
+    remove_temporary_store(&store);
+    remove_temporary_store(&mcp_store);
 }
 
 #[test]
@@ -593,7 +596,7 @@ fn canonical_plan_matches_the_cross_platform_golden_bytes() {
         output.stdout,
         std::fs::read(fixture("golden/create-invoice.plan.json")).unwrap()
     );
-    std::fs::remove_dir_all(store).unwrap();
+    remove_temporary_store(&store);
 }
 
 #[test]
@@ -625,7 +628,7 @@ fn cli_and_mcp_conformance_campaigns_are_semantically_identical() {
         }),
     );
     assert_eq!(response["result"]["structuredContent"], cli);
-    std::fs::remove_dir_all(store).unwrap();
+    remove_temporary_store(&store);
 }
 
 #[test]
@@ -645,7 +648,7 @@ fn websocket_cli_runs_the_sealed_session_and_explains_bounded_evidence() {
                 {"type":"expect-binary","payload_base64":"AgM=","timeout_ms":null},
                 {"type":"close","code":1000,"reason":"done"}
             ]),
-            500,
+            10_000,
         ),
     );
     let index = output_json(&["inspect", source.to_str().unwrap()]);
@@ -740,7 +743,7 @@ fn websocket_cli_runs_the_sealed_session_and_explains_bounded_evidence() {
     let denial: Value = serde_json::from_slice(&denied.stdout).unwrap();
     assert_eq!(denial["kind"], "denial");
     assert_eq!(denial["required"], "websocket:connect");
-    std::fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -757,7 +760,7 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
                 {"type":"expect-text","equals":"world","timeout_ms":null},
                 {"type":"close","code":1000,"reason":"done"}
             ]),
-            500,
+            10_000,
         ),
     );
     let planned = mcp_call_in(
@@ -843,7 +846,7 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
         explanation["result"]["structuredContent"]["selector"],
         "/entries/1/check"
     );
-    std::fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -859,7 +862,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
                 {"type":"expect-text","equals":"expected","timeout_ms":null},
                 {"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}
             ]),
-            500,
+            10_000,
         ),
     );
     let expectation_plan = plan_websocket(&expectation_source, &expectation_store);
@@ -883,7 +886,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
     let observation: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(observation["terminal_cause"], "expectation-failed");
     expectation_server.join().unwrap();
-    std::fs::remove_dir_all(expectation_root).unwrap();
+    remove_temporary_store(&expectation_root);
 
     let timeout_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let timeout_root = scratch("websocket-timeout");
@@ -922,7 +925,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
     let observation: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(observation["terminal_cause"], "action-timeout");
     timeout_server.join().unwrap();
-    std::fs::remove_dir_all(timeout_root).unwrap();
+    remove_temporary_store(&timeout_root);
 
     let handshake_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let handshake_root = scratch("websocket-handshake");
@@ -932,7 +935,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
         &websocket_source(
             handshake_listener.local_addr().unwrap().port(),
             json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let handshake_plan = plan_websocket(&handshake_source, &handshake_store);
@@ -959,7 +962,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
     let observation: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(observation["terminal_cause"], "handshake-check-failed");
     handshake_server.join().unwrap();
-    std::fs::remove_dir_all(handshake_root).unwrap();
+    remove_temporary_store(&handshake_root);
 }
 
 #[test]
@@ -975,7 +978,7 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
                 {"type":"expect-text","equals":"expected","timeout_ms":null},
                 {"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}
             ]),
-            500,
+            10_000,
         ),
     );
     let expectation_plan = mcp_call_in(
@@ -1015,7 +1018,7 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
     );
     assert_eq!(failed["result"]["isError"], false);
     expectation_server.join().unwrap();
-    std::fs::remove_dir_all(expectation_root).unwrap();
+    remove_temporary_store(&expectation_root);
 
     let timeout_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let timeout_root = scratch("websocket-mcp-timeout");
@@ -1064,7 +1067,7 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
     );
     assert_eq!(timed_out["result"]["isError"], true);
     timeout_server.join().unwrap();
-    std::fs::remove_dir_all(timeout_root).unwrap();
+    remove_temporary_store(&timeout_root);
 }
 
 #[test]
@@ -1075,7 +1078,7 @@ fn websocket_cli_rejects_invalid_sources_and_unsealed_overrides() {
         &websocket_source(
             9,
             json!([{"type":"expect-text","equals":"missing terminal","timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let store = root.join("state");
@@ -1098,7 +1101,7 @@ fn websocket_cli_rejects_invalid_sources_and_unsealed_overrides() {
         &websocket_source(
             9,
             json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let override_attempt = Command::new(binary())
@@ -1116,7 +1119,7 @@ fn websocket_cli_rejects_invalid_sources_and_unsealed_overrides() {
     assert_eq!(override_attempt.status.code(), Some(2));
     let error: Value = serde_json::from_slice(&override_attempt.stdout).unwrap();
     assert_eq!(error["code"], "invalid-websocket-plan-options");
-    std::fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -1172,5 +1175,5 @@ fn asyncapi_cli_inspects_and_seals_the_selected_message_variant() {
     assert_eq!(ambiguous.status.code(), Some(2));
     let error: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
     assert!(error["message"].as_str().unwrap().contains("ambiguous"));
-    std::fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
