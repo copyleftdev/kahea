@@ -349,11 +349,7 @@ fn yaml_to_json(
         Yaml::Hash(values) => {
             let mut object = Map::new();
             for (key, value) in values {
-                let Yaml::String(key) = key else {
-                    return Err(IngestError::Parse(format!(
-                        "non-string mapping key at {location}"
-                    )));
-                };
+                let key = yaml_mapping_key_to_string(key, location)?;
                 let child_location = format!("{location}/{}", escape_pointer(&key));
                 object.insert(key, yaml_to_json(value, &child_location, depth + 1, nodes)?);
             }
@@ -361,6 +357,17 @@ fn yaml_to_json(
         }
         Yaml::Alias(_) | Yaml::BadValue => Err(IngestError::Parse(format!(
             "unsupported YAML node at {location}"
+        ))),
+    }
+}
+
+fn yaml_mapping_key_to_string(key: Yaml, location: &str) -> Result<String, IngestError> {
+    match key {
+        Yaml::String(value) => Ok(value),
+        Yaml::Integer(value) => Ok(value.to_string()),
+        Yaml::Real(value) if value.parse::<f64>().is_ok_and(f64::is_finite) => Ok(value),
+        _ => Err(IngestError::Parse(format!(
+            "non-string mapping key at {location}"
         ))),
     }
 }
@@ -568,6 +575,56 @@ paths:
         let page = inspect_openapi(Path::new("billing.yaml"), SPEC.as_bytes(), None, 1, 0).unwrap();
         assert_eq!(page.operations.len(), 1);
         assert_eq!(page.next.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn numeric_yaml_response_status_keys_are_accepted() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Status keys, version: 1.0.0 }
+paths:
+  /token:
+    post:
+      operationId: getToken
+      responses:
+        '200': { description: ok }
+        401: { description: unauthorized }
+        422: { description: invalid }
+"#;
+        let source = load_openapi(Path::new("status-keys.yaml"), spec.as_bytes()).unwrap();
+        let responses = source.document["paths"]["/token"]["post"]["responses"]
+            .as_object()
+            .unwrap();
+        assert!(responses.contains_key("200"));
+        assert!(responses.contains_key("401"));
+        assert!(responses.contains_key("422"));
+
+        let index =
+            inspect_openapi(Path::new("status-keys.yaml"), spec.as_bytes(), None, 50, 0).unwrap();
+        assert_eq!(index.operations.len(), 1);
+        assert_eq!(index.operations[0].3, "getToken");
+    }
+
+    #[test]
+    fn unsupported_yaml_mapping_keys_are_still_rejected() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Boolean key, version: 1.0.0 }
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        true: { description: ok }
+"#;
+        let error = load_openapi(Path::new("boolean-key.yaml"), spec.as_bytes())
+            .expect_err("a boolean mapping key was accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("non-string mapping key at #/paths/~1health/get/responses"),
+            "unexpected rejection: {error}"
+        );
     }
 
     #[test]
