@@ -220,6 +220,7 @@ impl<S: Write> Write for AccountedStream<S> {
 pub struct WebSocketConnection {
     pub metadata: WebSocketHandshakeMetadata,
     socket: Socket,
+    cancellation: Option<Arc<AtomicBool>>,
     deadline: Arc<Mutex<DeadlineState>>,
     started: Instant,
     total_deadline: Instant,
@@ -243,6 +244,12 @@ impl WebSocketCancellation {
 }
 
 impl WebSocketConnection {
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    }
+
     pub fn is_open(&self) -> bool {
         self.socket.can_read() || self.socket.can_write()
     }
@@ -504,6 +511,7 @@ fn connect_websocket_resolving_cancellable(
         connect_deadline,
         WebSocketTerminalCause::ConnectTimeout,
     )));
+    let cancellation_handle = cancellation.clone();
     let stream = DeadlineTcpStream::new(stream, Arc::clone(&deadline_handle), cancellation);
     let config = websocket_config(plan)?;
     let stream = match websocket_stream(stream, &target, tls) {
@@ -589,6 +597,7 @@ fn connect_websocket_resolving_cancellable(
         WebSocketConnection {
             metadata,
             socket,
+            cancellation: cancellation_handle,
             deadline: deadline_handle,
             started,
             total_deadline,
@@ -1391,7 +1400,14 @@ fn socket_error(
     }
     match error {
         WebSocketError::Io(error) if error.kind() == io::ErrorKind::Interrupted => {
-            SessionTerminal::error(WebSocketTerminalCause::Cancelled)
+            // The deadline stream retries a bare signal, so an interruption reaching here came from
+            // the cancellation path. Report it as cancelled only if cancellation was in fact
+            // requested; otherwise a stray signal would be reported as a decision the caller made.
+            if interruption_is_cancellation(connection.cancellation_requested()) {
+                SessionTerminal::error(WebSocketTerminalCause::Cancelled)
+            } else {
+                SessionTerminal::error(WebSocketTerminalCause::IoFailure)
+            }
         }
         WebSocketError::Io(error)
             if matches!(
@@ -2459,6 +2475,12 @@ impl DeadlineTcpStream {
         Ok(())
     }
 
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    }
+
     fn note_activity(&self) -> io::Result<()> {
         self.deadline
             .lock()
@@ -2482,6 +2504,12 @@ impl Read for DeadlineTcpStream {
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                     self.await_deadline()?;
                 }
+                Err(error)
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && !interruption_is_cancellation(self.cancellation_requested()) =>
+                {
+                    self.remaining()?;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -2502,6 +2530,12 @@ impl Write for DeadlineTcpStream {
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                     self.await_deadline()?;
                 }
+                Err(error)
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && !interruption_is_cancellation(self.cancellation_requested()) =>
+                {
+                    self.remaining()?;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -2515,10 +2549,26 @@ impl Write for DeadlineTcpStream {
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                     self.await_deadline()?;
                 }
+                Err(error)
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && !interruption_is_cancellation(self.cancellation_requested()) =>
+                {
+                    self.remaining()?;
+                }
                 Err(error) => return Err(error),
             }
         }
     }
+}
+
+/// Whether an interrupted syscall means this session was cancelled.
+///
+/// `EINTR` says a signal arrived while the thread was blocked. It says nothing about the session:
+/// no deadline passed, no peer acted, nothing was decided. Only the caller's cancellation flag can
+/// make an interruption meaningful, and the flag is the thing to ask — the errno is the same either
+/// way, which is why this is a function and not a match arm.
+const fn interruption_is_cancellation(cancellation_requested: bool) -> bool {
+    cancellation_requested
 }
 
 fn normalize_timeout(error: io::Error) -> io::Error {
@@ -3156,6 +3206,20 @@ mod tests {
         silent_server.join().unwrap();
         drop(store);
         remove_temporary_store(&root);
+    }
+
+    /// A signal is not a decision, and only the caller's flag can make an interruption one.
+    ///
+    /// `EINTR` and a cancelled session arrive as the same `ErrorKind::Interrupted`, and the code
+    /// used to report both as `cancelled` — so a stray signal on a macOS runner ended a healthy
+    /// session with a terminal cause claiming the caller had asked for it.
+    #[test]
+    fn an_interrupted_syscall_is_only_cancellation_when_cancellation_was_requested() {
+        assert!(interruption_is_cancellation(true));
+        assert!(
+            !interruption_is_cancellation(false),
+            "a bare signal must not be reported as a cancelled session"
+        );
     }
 
     /// A socket that reports "would block" before the deadline must not end the session.
