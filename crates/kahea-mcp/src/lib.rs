@@ -853,6 +853,9 @@ mod tests {
         assert!(response["result"]["capabilities"]["tools"].is_object());
     }
 
+    const CONFIGURATION_DENYING_EVERY_HOST: &str =
+        "version = 1\n\n[policy]\nallowed_hosts = [\"nothing.example.test\"]\n";
+
     fn temporary_store(label: &str) -> ServerOptions {
         let store = std::env::temp_dir().join(format!(
             "kahea-mcp-{label}-{}-{:?}",
@@ -922,6 +925,57 @@ mod tests {
     }
 
     #[test]
+    fn the_pinned_configuration_governs_planning() {
+        let billing =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/billing.openapi.yaml");
+        let arguments = json!({
+            "source": billing,
+            "operation": "createInvoice",
+            "input": {"customer_id":"cus_01KAHEA","amount":125.5},
+        });
+
+        let default_store = temporary_store("config-default");
+        tool_plan(&default_store, &arguments).expect("no configuration allows every host");
+
+        let store_config = temporary_store("config-store");
+        std::fs::write(
+            store_config.store.join("config.toml"),
+            CONFIGURATION_DENYING_EVERY_HOST,
+        )
+        .unwrap();
+        let denied = tool_plan(&store_config, &arguments).expect_err("store configuration applies");
+        assert!(
+            denied
+                .to_string()
+                .contains("outside the configured allowlist")
+        );
+
+        let explicit = temporary_store("config-explicit");
+        let path = explicit.store.join("named.toml");
+        std::fs::write(&path, CONFIGURATION_DENYING_EVERY_HOST).unwrap();
+        let explicit = ServerOptions {
+            config: Some(path),
+            ..explicit
+        };
+        let denied = tool_plan(&explicit, &arguments).expect_err("named configuration applies");
+        assert!(
+            denied
+                .to_string()
+                .contains("outside the configured allowlist")
+        );
+
+        let missing = ServerOptions {
+            config: Some(default_store.store.join("absent.toml")),
+            ..temporary_store("config-missing")
+        };
+        tool_plan(&missing, &arguments).expect_err("a named configuration must exist");
+
+        for options in [default_store, store_config, explicit, missing] {
+            let _ = std::fs::remove_dir_all(options.store);
+        }
+    }
+
+    #[test]
     fn sealed_plans_still_invoke_from_the_pinned_store() {
         let options = temporary_store("invoke-roundtrip");
         let source =
@@ -940,6 +994,27 @@ mod tests {
         assert_eq!(denial["kind"], "denial");
         assert_eq!(denial["plan"], planned["id"]);
         std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[test]
+    fn resource_templates_advertise_plans_and_untrusted_evidence() {
+        let response = dispatch(
+            &ServerOptions::default(),
+            &json!({"jsonrpc":"2.0","id":9,"method":"resources/templates/list","params":{}}),
+        )
+        .unwrap();
+        let templates = response["result"]["resourceTemplates"].as_array().unwrap();
+        let uris: Vec<_> = templates
+            .iter()
+            .map(|template| template["uriTemplate"].as_str().unwrap())
+            .collect();
+        assert_eq!(uris, ["kahea://plan/{handle}", "kahea://evidence/{handle}"]);
+        assert!(
+            templates[1]["description"]
+                .as_str()
+                .unwrap()
+                .contains("untrusted")
+        );
     }
 
     #[test]
