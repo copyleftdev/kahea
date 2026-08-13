@@ -2341,7 +2341,7 @@ pub fn load_websocket_plan(root: &Path, reference: &str) -> Result<WebSocketPlan
 mod tests {
     use super::*;
     use kahea_ingest::{load_openapi, resolve_operation};
-    use kahea_test_server::remove_temporary_store;
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
     use serde_json::json;
 
     const SPEC: &str = r#"
@@ -3230,8 +3230,7 @@ actions:
         let serialized = serde_json::to_string(&plan).unwrap();
         assert!(!serialized.contains("chat/sandbox"));
 
-        let root =
-            std::env::temp_dir().join(format!("kahea-websocket-plan-store-{}", std::process::id()));
+        let root = temporary_store_path("websocket-plan-store");
         let path = store_websocket_plan(&root, &plan).unwrap();
         assert_eq!(
             load_websocket_plan(&root, &plan.id).unwrap().fingerprint,
@@ -3396,7 +3395,7 @@ allowed_hosts = ["api.example.test"]
 
     #[test]
     fn multipart_file_upload_bytes_are_sealed_into_the_plan() {
-        let root = std::env::temp_dir().join(format!("kahea-upload-{}", std::process::id()));
+        let root = temporary_store_path("upload");
         fs::create_dir_all(&root).unwrap();
         let upload = root.join("sample.bin");
         fs::write(&upload, [0_u8, 1, 2, 255]).unwrap();
@@ -3469,7 +3468,7 @@ paths:
             67_108_864
         );
 
-        let root = std::env::temp_dir().join(format!("kahea-config-{}", std::process::id()));
+        let root = temporary_store_path("config");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("config.toml");
         fs::write(
@@ -3751,7 +3750,7 @@ paths:
             },
         )
         .unwrap();
-        let root = std::env::temp_dir().join(format!("kahea-plan-store-{}", std::process::id()));
+        let root = temporary_store_path("plan-store");
         let path = store_plan(&root, &plan).unwrap();
         assert_eq!(load_plan(&root, &plan.id).unwrap().id, plan.id);
         let mut tampered: RequestPlan = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

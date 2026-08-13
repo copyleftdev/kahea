@@ -1623,7 +1623,7 @@ fn safe_exec_reason(error: &ExecError) -> String {
 mod tests {
     use super::*;
     use kahea_ingest::{load_openapi, resolve_operation};
-    use kahea_test_server::remove_temporary_store;
+    use kahea_test_server::{remove_temporary_store, temporary_store_path};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -1788,8 +1788,7 @@ paths:
             &ProjectConfiguration::default(),
         )
         .unwrap();
-        let root =
-            std::env::temp_dir().join(format!("kahea-conformance-store-{}", std::process::id()));
+        let root = temporary_store_path("conformance-store");
         store_conformance_plan(&root, &campaign, &requests).unwrap();
         assert_eq!(
             load_conformance_plan(&root, &campaign.id)
@@ -1816,10 +1815,7 @@ paths:
         .unwrap();
         campaign.cases[0].plan_fingerprint = "request:fingerprint:mismatch".into();
         campaign = campaign.seal().unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "kahea-conformance-store-mismatch-{}",
-            std::process::id()
-        ));
+        let root = temporary_store_path("conformance-store-mismatch");
 
         assert!(matches!(
             store_conformance_plan(&root, &campaign, &requests),
@@ -1842,8 +1838,7 @@ paths:
             &ProjectConfiguration::default(),
         )
         .unwrap();
-        let root =
-            std::env::temp_dir().join(format!("kahea-conformance-denial-{}", std::process::id()));
+        let root = temporary_store_path("conformance-denial");
         store_conformance_plan(&root, &campaign, &requests).unwrap();
         let evidence = EvidenceStore::open(root.join("store")).unwrap();
         let observation =
@@ -1874,10 +1869,7 @@ paths:
         .unwrap();
         campaign.cases[0].request_digest = "request:digest:mismatch".into();
         campaign = campaign.seal().unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "kahea-conformance-digest-mismatch-{}",
-            std::process::id()
-        ));
+        let root = temporary_store_path("conformance-digest-mismatch");
         store_conformance_plan(&root, &campaign, &requests).unwrap();
         let evidence = EvidenceStore::open(root.join("store")).unwrap();
         let options = InvokeOptions {
@@ -1917,10 +1909,7 @@ paths:
             .required_grants
             .retain(|grant| grant != &request_grant);
         campaign = campaign.seal().unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "kahea-conformance-case-denial-{}",
-            std::process::id()
-        ));
+        let root = temporary_store_path("conformance-case-denial");
         store_conformance_plan(&root, &campaign, &requests).unwrap();
         let evidence = EvidenceStore::open(root.join("store")).unwrap();
         let observation = invoke_conformance(
@@ -1965,10 +1954,7 @@ paths:
             &ProjectConfiguration::default(),
         )
         .unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "kahea-conformance-transport-{}",
-            std::process::id()
-        ));
+        let root = temporary_store_path("conformance-transport");
         store_conformance_plan(&root, &campaign, &requests).unwrap();
         let evidence = EvidenceStore::open(root.join("store")).unwrap();
         let observation = invoke_conformance(
@@ -2377,8 +2363,7 @@ paths:
                 .unwrap();
             }
         });
-        let root =
-            std::env::temp_dir().join(format!("kahea-conformance-invoke-{}", std::process::id()));
+        let root = temporary_store_path("conformance-invoke");
         store_conformance_plan(&root, &campaign, &requests).unwrap();
         let evidence = EvidenceStore::open(root.join("store")).unwrap();
         let options = InvokeOptions {

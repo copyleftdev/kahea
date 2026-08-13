@@ -6,11 +6,10 @@ use kahea_core::digest;
 use kahea_ingest::{
     IngestError, inspect_source, load_source, read_source_artifact, resolve_operation,
 };
-use kahea_test_server::remove_temporary_store;
+use kahea_test_server::{remove_temporary_store, temporary_store_path};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const HTTP_METHODS: [&str; 9] = [
     "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE", "TRACE", "QUERY",
@@ -40,11 +39,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("kahea-formats-{name}-{nonce}"))
+    temporary_store_path(&format!("formats-{name}"))
 }
 
 fn copy_tree(from: &Path, to: &Path) {
