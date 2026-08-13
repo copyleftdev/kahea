@@ -33,6 +33,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 const MCP_VERSION: &str = "2025-11-25";
+const DEFAULT_STORE: &str = ".kahea";
+const PLAN_KINDS: [&str; 3] = ["plan", "workflow-plan", "conformance-plan"];
 
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -44,7 +46,64 @@ pub enum McpError {
     Operation(String),
 }
 
-pub fn serve_stdio() -> Result<(), McpError> {
+/// Filesystem boundary of one server process.
+///
+/// The store root and the configuration path are process arguments, never tool arguments. A caller
+/// composing a tool call cannot relocate the store it writes to, nor choose the configuration whose
+/// policy fingerprint its plans are measured against.
+#[derive(Debug, Clone)]
+pub struct ServerOptions {
+    pub store: PathBuf,
+    pub config: Option<PathBuf>,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            store: PathBuf::from(DEFAULT_STORE),
+            config: None,
+        }
+    }
+}
+
+impl ServerOptions {
+    fn configuration(&self) -> Result<ProjectConfiguration, McpError> {
+        let path = self.config.clone().or_else(|| {
+            let default = self.store.join("config.toml");
+            default.exists().then_some(default)
+        });
+        Ok(path
+            .as_deref()
+            .map(ProjectConfiguration::load)
+            .transpose()
+            .map_err(operation_error)?
+            .unwrap_or_default())
+    }
+
+    fn evidence(&self) -> Result<EvidenceStore, McpError> {
+        EvidenceStore::open(self.store.join("store")).map_err(operation_error)
+    }
+
+    /// Resolve a validated plan handle to a real path inside the pinned store.
+    ///
+    /// The handle grammar already forbids separators, so the join cannot escape; canonicalizing and
+    /// comparing against the store root also catches an escape planted through a symlink.
+    fn confined_plan_path(&self, reference: &str) -> Result<PathBuf, McpError> {
+        validate_plan_reference(reference)?;
+        let root = self.store.canonicalize().map_err(|_| plan_load_error())?;
+        let path = root
+            .join("store/plans")
+            .join(format!("{}.json", reference.replace(':', "-")))
+            .canonicalize()
+            .map_err(|_| plan_load_error())?;
+        if !path.starts_with(&root) {
+            return Err(plan_load_error());
+        }
+        Ok(path)
+    }
+}
+
+pub fn serve_stdio(options: ServerOptions) -> Result<(), McpError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -55,7 +114,7 @@ pub fn serve_stdio() -> Result<(), McpError> {
         }
         let message: Value =
             serde_json::from_str(&line).map_err(|error| McpError::Invalid(error.to_string()))?;
-        if let Some(response) = dispatch(&message) {
+        if let Some(response) = dispatch(&options, &message) {
             serde_json::to_writer(&mut output, &response)
                 .map_err(|error| McpError::Invalid(error.to_string()))?;
             output.write_all(b"\n")?;
@@ -65,7 +124,7 @@ pub fn serve_stdio() -> Result<(), McpError> {
     Ok(())
 }
 
-fn dispatch(request: &Value) -> Option<Value> {
+fn dispatch(options: &ServerOptions, request: &Value) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str)?;
     let id = request.get("id")?.clone();
     let result = match method {
@@ -77,7 +136,7 @@ fn dispatch(request: &Value) -> Option<Value> {
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
-        "tools/call" => match call_tool(request.get("params").unwrap_or(&Value::Null)) {
+        "tools/call" => match call_tool(options, request.get("params").unwrap_or(&Value::Null)) {
             Ok(result) => Ok(result),
             Err(error) => Ok(json!({
                 "content":[{"type":"text","text":error.to_string()}],
@@ -86,7 +145,7 @@ fn dispatch(request: &Value) -> Option<Value> {
         },
         "resources/list" => Ok(json!({"resources": fixed_resources()})),
         "resources/templates/list" => Ok(json!({"resourceTemplates": resource_templates()})),
-        "resources/read" => read_resource(request.get("params").unwrap_or(&Value::Null)),
+        "resources/read" => read_resource(options, request.get("params").unwrap_or(&Value::Null)),
         _ => return Some(rpc_error(id, -32601, "method not found")),
     };
     Some(match result {
@@ -118,7 +177,6 @@ fn tools() -> Value {
                 "input":{}, "set":{"type":"array","items":{"type":"string"}},
                 "server":{"type":"string"}, "auth":{"type":"string"},
                 "content_type":{"type":"string"}, "checks":{"type":"array","items":{"type":"string"}},
-                "config":{"type":"string"},
                 "conformance": {
                     "type":"object",
                     "properties": {
@@ -129,8 +187,7 @@ fn tools() -> Value {
                         "max_failures":{"type":"integer","minimum":1,"maximum":256,"default":10}
                     },
                     "additionalProperties":false
-                },
-                "store":{"type":"string","default":".kahea"}
+                }
             }), &["source","operation"]),
             "outputSchema": output_schema(&["plan","workflow-plan","conformance-plan","websocket-plan"]),
             "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
@@ -139,13 +196,11 @@ fn tools() -> Value {
             "name": "kahea_invoke",
             "description": "Execute an exact sealed HTTP, workflow, conformance, or finite WebSocket plan under the exact explicit grants it declares. This may cause remote side effects; inspect the plan risk first. Full WebSocket transcripts remain in evidence and are returned only as handles.",
             "inputSchema": object_schema(json!({
-                "plan":{"type":"string","description":"Sealed plan handle or local sealed plan file path."},
+                "plan":{"type":"string","description":"Sealed plan handle returned by kahea_plan. Filesystem paths are not accepted."},
                 "grants":{"type":"array","items":{"type":"string"},"description":"Exact capabilities copied from the sealed plan required_grants array."},
                 "secret_env":{"type":"object","description":"Map of secret profile names to environment variable names. Never pass secret values.","additionalProperties":{"type":"string"}},
                 "timeout_ms":{"type":"integer","minimum":1,"default":30000},
-                "max_response_bytes":{"type":"integer","minimum":1,"default":16777216},
-                "config":{"type":"string"},
-                "store":{"type":"string","default":".kahea"}
+                "max_response_bytes":{"type":"integer","minimum":1,"default":16777216}
             }), &["plan","grants"]),
             "outputSchema": output_schema(&["observation","workflow-observation","conformance-observation","websocket-observation","denial"]),
             "annotations": {"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}
@@ -154,8 +209,7 @@ fn tools() -> Value {
             "name": "kahea_explain",
             "description": "Read local evidence by handle and optionally select a bounded JSON Pointer, JSONPath, XPath, header, or byte range.",
             "inputSchema": object_schema(json!({
-                "handle":{"type":"string"}, "select":{"type":"string"},
-                "store":{"type":"string","default":".kahea"}
+                "handle":{"type":"string"}, "select":{"type":"string"}
             }), &["handle"]),
             "outputSchema": output_schema(&["explanation"]),
             "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
@@ -179,17 +233,48 @@ fn output_schema(names: &[&str]) -> Value {
     }
 }
 
-fn call_tool(params: &Value) -> Result<Value, McpError> {
+/// Enforce the declared `additionalProperties: false` contract at the call boundary.
+///
+/// Schemas are advisory to a client; a server that silently ignores an argument it no longer honors
+/// would accept a call that means something different from what the caller wrote. The store root
+/// and the configuration path used to be arguments, so silence there would be a policy decision
+/// made by omission.
+fn reject_undeclared_arguments(name: &str, arguments: &Value) -> Result<(), McpError> {
+    let Some(arguments) = arguments.as_object() else {
+        return Ok(());
+    };
+    let tools = tools();
+    let Some(declared) = tools
+        .as_array()
+        .expect("tools is an array")
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .and_then(|tool| tool["inputSchema"]["properties"].as_object())
+    else {
+        return Ok(());
+    };
+    for key in arguments.keys() {
+        if !declared.contains_key(key) {
+            return Err(McpError::Invalid(format!(
+                "{name} does not accept the argument {key:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn call_tool(options: &ServerOptions, params: &Value) -> Result<Value, McpError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| McpError::Invalid("tool name is missing".into()))?;
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
+    reject_undeclared_arguments(name, arguments)?;
     let envelope = match name {
         "kahea_inspect" => tool_inspect(arguments)?,
-        "kahea_plan" => tool_plan(arguments)?,
-        "kahea_invoke" => tool_invoke(arguments)?,
-        "kahea_explain" => tool_explain(arguments)?,
+        "kahea_plan" => tool_plan(options, arguments)?,
+        "kahea_invoke" => tool_invoke(options, arguments)?,
+        "kahea_explain" => tool_explain(options, arguments)?,
         _ => return Err(McpError::Invalid(format!("unknown tool {name:?}"))),
     };
     let exit = envelope.get("exit").and_then(Value::as_u64).unwrap_or(2);
@@ -247,7 +332,7 @@ fn tool_inspect(arguments: &Value) -> Result<Value, McpError> {
     serde_json::to_value(envelope).map_err(serialization_error)
 }
 
-fn tool_plan(arguments: &Value) -> Result<Value, McpError> {
+fn tool_plan(options: &ServerOptions, arguments: &Value) -> Result<Value, McpError> {
     let path = PathBuf::from(required_string(arguments, "source")?);
     let bytes = read(&path)?;
     let raw = parse_data_document(&path, &bytes).map_err(operation_error)?;
@@ -263,19 +348,8 @@ fn tool_plan(arguments: &Value) -> Result<Value, McpError> {
                 .and_then(|value| parse_explicit_field(value).map_err(operation_error))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let store =
-        PathBuf::from(optional_string(arguments, "store").unwrap_or_else(|| ".kahea".into()));
-    let configuration = optional_string(arguments, "config")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let default = store.join("config.toml");
-            default.exists().then_some(default)
-        })
-        .as_deref()
-        .map(ProjectConfiguration::load)
-        .transpose()
-        .map_err(operation_error)?
-        .unwrap_or_default();
+    let store = options.store.clone();
+    let configuration = options.configuration()?;
     if is_websocket_session(&raw) {
         if arguments.get("input").is_some()
             || !explicit.is_empty()
@@ -430,23 +504,13 @@ fn tool_plan(arguments: &Value) -> Result<Value, McpError> {
     serde_json::to_value(plan).map_err(serialization_error)
 }
 
-fn tool_invoke(arguments: &Value) -> Result<Value, McpError> {
-    let store_root =
-        PathBuf::from(optional_string(arguments, "store").unwrap_or_else(|| ".kahea".into()));
+fn tool_invoke(options: &ServerOptions, arguments: &Value) -> Result<Value, McpError> {
+    let store_root = options.store.clone();
     let plan_reference = required_string(arguments, "plan")?;
+    options.confined_plan_path(plan_reference)?;
     let secrets = resolve_secret_env(arguments.get("secret_env"))?;
-    let configuration = optional_string(arguments, "config")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let default = store_root.join("config.toml");
-            default.exists().then_some(default)
-        })
-        .as_deref()
-        .map(ProjectConfiguration::load)
-        .transpose()
-        .map_err(operation_error)?
-        .unwrap_or_default();
-    let evidence = EvidenceStore::open(store_root.join("store")).map_err(operation_error)?;
+    let configuration = options.configuration()?;
+    let evidence = options.evidence()?;
     let plan_kind = stored_plan_kind(&store_root, plan_reference);
     let expected_policy_fingerprint = if plan_kind.as_deref() == Some("websocket-plan") {
         configuration.websocket_policy_fingerprint()
@@ -478,7 +542,8 @@ fn tool_invoke(arguments: &Value) -> Result<Value, McpError> {
         additional_root_certificates_pem: Vec::new(),
     };
     if plan_kind.as_deref() == Some("websocket-plan") {
-        let plan = load_websocket_plan(&store_root, plan_reference).map_err(operation_error)?;
+        let plan =
+            load_websocket_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
         let result = execute_websocket(&plan, &options, &evidence).map_err(operation_error)?;
         return match result {
             WebSocketConnectResult::Observation(observation) => serde_json::to_value(observation),
@@ -492,18 +557,20 @@ fn tool_invoke(arguments: &Value) -> Result<Value, McpError> {
         .map_err(serialization_error);
     }
     if plan_kind.as_deref() == Some("conformance-plan") {
-        let plan = load_conformance_plan(&store_root, plan_reference).map_err(operation_error)?;
+        let plan =
+            load_conformance_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
         let observation =
             invoke_conformance(&plan, &options, &store_root, &evidence).map_err(operation_error)?;
         return serde_json::to_value(observation).map_err(serialization_error);
     }
     if plan_kind.as_deref() == Some("workflow-plan") {
-        let plan = load_workflow_plan(&store_root, plan_reference).map_err(operation_error)?;
+        let plan =
+            load_workflow_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
         let observation = invoke_workflow(&plan, &options, &configuration, &store_root, &evidence)
             .map_err(operation_error)?;
         return serde_json::to_value(observation).map_err(serialization_error);
     }
-    let plan = load_plan(&store_root, plan_reference).map_err(operation_error)?;
+    let plan = load_plan(&store_root, plan_reference).map_err(|_| plan_load_error())?;
     let result = invoke(&plan, &options, &evidence).map_err(operation_error)?;
     match result {
         InvocationResult::Observation(value) => serde_json::to_value(value),
@@ -512,10 +579,8 @@ fn tool_invoke(arguments: &Value) -> Result<Value, McpError> {
     .map_err(serialization_error)
 }
 
-fn tool_explain(arguments: &Value) -> Result<Value, McpError> {
-    let root =
-        PathBuf::from(optional_string(arguments, "store").unwrap_or_else(|| ".kahea".into()));
-    let evidence = EvidenceStore::open(root.join("store")).map_err(operation_error)?;
+fn tool_explain(options: &ServerOptions, arguments: &Value) -> Result<Value, McpError> {
+    let evidence = options.evidence()?;
     let value = evidence
         .explain(
             required_string(arguments, "handle")?,
@@ -558,8 +623,9 @@ fn resource_templates() -> Value {
     ])
 }
 
-fn read_resource(params: &Value) -> Result<Value, McpError> {
+fn read_resource(options: &ServerOptions, params: &Value) -> Result<Value, McpError> {
     let uri = required_string(params, "uri")?;
+    let store = options.store.as_path();
     if uri == "kahea://describe" {
         return text_resource(
             uri,
@@ -577,29 +643,17 @@ fn read_resource(params: &Value) -> Result<Value, McpError> {
         );
     }
     if let Some(handle) = uri.strip_prefix("kahea://plan/") {
-        validate_handle(handle)?;
+        options.confined_plan_path(handle)?;
         let value = if handle.starts_with("workflow-plan:") {
-            serde_json::to_value(
-                load_workflow_plan(Path::new(".kahea"), handle).map_err(operation_error)?,
-            )
+            serde_json::to_value(load_workflow_plan(store, handle).map_err(|_| plan_load_error())?)
         } else if handle.starts_with("conformance-plan:") {
             serde_json::to_value(
-                load_conformance_plan(Path::new(".kahea"), handle).map_err(operation_error)?,
+                load_conformance_plan(store, handle).map_err(|_| plan_load_error())?,
             )
-        } else if handle.starts_with("plan:") {
-            if stored_plan_kind(Path::new(".kahea"), handle).as_deref() == Some("websocket-plan") {
-                serde_json::to_value(
-                    load_websocket_plan(Path::new(".kahea"), handle).map_err(operation_error)?,
-                )
-            } else {
-                serde_json::to_value(
-                    load_plan(Path::new(".kahea"), handle).map_err(operation_error)?,
-                )
-            }
+        } else if stored_plan_kind(store, handle).as_deref() == Some("websocket-plan") {
+            serde_json::to_value(load_websocket_plan(store, handle).map_err(|_| plan_load_error())?)
         } else {
-            return Err(McpError::Invalid(
-                "plan resource handle has an invalid kind".into(),
-            ));
+            serde_json::to_value(load_plan(store, handle).map_err(|_| plan_load_error())?)
         }
         .map_err(serialization_error)?;
         return text_resource(
@@ -610,7 +664,7 @@ fn read_resource(params: &Value) -> Result<Value, McpError> {
     }
     if let Some(handle) = uri.strip_prefix("kahea://evidence/") {
         validate_handle(handle)?;
-        let evidence = EvidenceStore::open(".kahea/store").map_err(operation_error)?;
+        let evidence = options.evidence()?;
         let record = evidence.get(handle).map_err(operation_error)?;
         if let Ok(text) = std::str::from_utf8(&record.data) {
             return text_resource(uri, &record.envelope.media_type, text);
@@ -622,6 +676,33 @@ fn read_resource(params: &Value) -> Result<Value, McpError> {
         }]}));
     }
     Err(McpError::Invalid(format!("unknown resource {uri:?}")))
+}
+
+/// A plan reference on the MCP surface is a sealed plan handle, never a filesystem path.
+///
+/// `kahea invoke` still accepts a path, because an operator typed it. A tool argument is written by
+/// a model, so the same affordance would let a call name any file the server can read.
+fn validate_plan_reference(reference: &str) -> Result<(), McpError> {
+    validate_handle(reference).map_err(|_| plan_reference_error())?;
+    let (kind, _) = reference.rsplit_once(':').expect("handle is validated");
+    if !PLAN_KINDS.contains(&kind) {
+        return Err(plan_reference_error());
+    }
+    Ok(())
+}
+
+fn plan_reference_error() -> McpError {
+    McpError::Invalid(
+        "plan must be a sealed plan handle stored by this server, not a filesystem path".into(),
+    )
+}
+
+/// A single message for every way a plan reference fails to resolve.
+///
+/// Reporting whether the target was missing, unreadable, unparseable, or unsealed would answer
+/// questions about the filesystem that a caller should not be able to ask.
+fn plan_load_error() -> McpError {
+    McpError::Invalid("plan handle does not resolve to a sealed plan in this store".into())
 }
 
 fn validate_handle(handle: &str) -> Result<(), McpError> {
@@ -767,15 +848,30 @@ mod tests {
 
     #[test]
     fn initializes_with_current_mcp_capabilities() {
-        let response = dispatch(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":MCP_VERSION}})).unwrap();
+        let response = dispatch(&ServerOptions::default(), &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":MCP_VERSION}})).unwrap();
         assert_eq!(response["result"]["protocolVersion"], MCP_VERSION);
         assert!(response["result"]["capabilities"]["tools"].is_object());
     }
 
-    #[test]
-    fn asyncapi_tools_share_the_canonical_websocket_plan_path() {
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/asyncapi/session-3.0.json");
+    fn temporary_store(label: &str) -> ServerOptions {
+        let store = std::env::temp_dir().join(format!(
+            "kahea-mcp-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&store).unwrap();
+        ServerOptions {
+            store,
+            config: None,
+        }
+    }
+
+    fn asyncapi_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/asyncapi/session-3.0.json")
+    }
+
+    fn plan_one_websocket_session(options: &ServerOptions) -> (Value, Value) {
+        let source = asyncapi_fixture();
         let inspected = tool_inspect(&json!({"source":source,"limit":50})).unwrap();
         let selected = inspected["operations"]
             .as_array()
@@ -786,22 +882,64 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let store = std::env::temp_dir().join(format!("kahea-mcp-asyncapi-{}", std::process::id()));
-        let planned = tool_plan(&json!({
-            "source": source,
-            "operation": selected,
-            "set": ["channel.room=ci"],
-            "store": store.display().to_string(),
-        }))
+        let planned = tool_plan(
+            options,
+            &json!({
+                "source": source,
+                "operation": selected,
+                "set": ["channel.room=ci"],
+            }),
+        )
         .unwrap();
+        (inspected, planned)
+    }
+
+    #[test]
+    fn asyncapi_tools_share_the_canonical_websocket_plan_path() {
+        let options = temporary_store("asyncapi");
+        let (inspected, planned) = plan_one_websocket_session(&options);
         assert_eq!(planned["kind"], "websocket-plan");
-        assert_eq!(planned["operation"], selected);
         assert_eq!(planned["target"], "wss://socket.example.test/v1/events/ci");
         assert_eq!(
             planned["source_fingerprints"],
             inspected["source_fingerprints"]
         );
-        std::fs::remove_dir_all(store).unwrap();
+        std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[test]
+    fn plans_written_to_the_pinned_store_read_back_as_resources() {
+        let options = temporary_store("resource-roundtrip");
+        let (_, planned) = plan_one_websocket_session(&options);
+        let handle = planned["id"].as_str().unwrap();
+        let resource =
+            read_resource(&options, &json!({"uri": format!("kahea://plan/{handle}")})).unwrap();
+        let text = resource["contents"][0]["text"].as_str().unwrap();
+        let value: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(value["id"], planned["id"]);
+        assert_eq!(value["kind"], "websocket-plan");
+        std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[test]
+    fn sealed_plans_still_invoke_from_the_pinned_store() {
+        let options = temporary_store("invoke-roundtrip");
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/billing.openapi.yaml");
+        let planned = tool_plan(
+            &options,
+            &json!({
+                "source": source,
+                "operation": "createInvoice",
+                "input": {"customer_id":"cus_01KAHEA","amount":125.5},
+            }),
+        )
+        .unwrap();
+        let handle = planned["id"].as_str().unwrap();
+        let denial = tool_invoke(&options, &json!({"plan": handle, "grants": []})).unwrap();
+        assert_eq!(denial["kind"], "denial");
+        assert_eq!(denial["plan"], planned["id"]);
+        std::fs::remove_dir_all(options.store).unwrap();
     }
 
     #[test]
@@ -812,13 +950,118 @@ mod tests {
     }
 
     #[test]
+    fn invoke_rejects_filesystem_paths_in_place_of_plan_handles() {
+        let options = temporary_store("plan-paths");
+        for reference in [
+            "/etc/passwd",
+            "../../etc/passwd",
+            "plan.json",
+            ".kahea/store/plans/plan-0123456789ab.json",
+            "plan:0123456789ab/../../../etc/passwd",
+            "plan:too-short",
+            "evidence:0123456789ab",
+        ] {
+            let error = tool_invoke(&options, &json!({"plan": reference, "grants": []}))
+                .expect_err(reference);
+            assert!(
+                matches!(&error, McpError::Invalid(message) if message.contains("sealed plan handle")),
+                "{reference} produced {error}"
+            );
+        }
+        std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[test]
+    fn plan_resources_reject_filesystem_paths() {
+        let options = temporary_store("resource-paths");
+        let error = read_resource(&options, &json!({"uri":"kahea://plan//etc/passwd"}))
+            .expect_err("path resource");
+        assert!(matches!(error, McpError::Invalid(_)));
+        std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[test]
+    fn unresolved_plan_handles_do_not_report_filesystem_state() {
+        let options = temporary_store("plan-oracle");
+        let missing = tool_invoke(&options, &json!({"plan":"plan:0123456789ab","grants":[]}))
+            .expect_err("missing plan");
+        let message = missing.to_string();
+        assert!(
+            !message.contains("No such file")
+                && !message.contains("os error")
+                && !message.contains(options.store.to_str().unwrap()),
+            "{message}"
+        );
+        std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_plans_cannot_leave_the_pinned_store() {
+        let options = temporary_store("plan-symlink");
+        let plans = options.store.join("store/plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        let outside = options.store.parent().unwrap().join(format!(
+            "kahea-mcp-outside-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&outside, br#"{"kind":"plan"}"#).unwrap();
+        std::os::unix::fs::symlink(&outside, plans.join("plan-0123456789ab.json")).unwrap();
+        let error = options
+            .confined_plan_path("plan:0123456789ab")
+            .expect_err("symlinked plan");
+        assert!(matches!(error, McpError::Invalid(_)));
+        std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir_all(options.store).unwrap();
+    }
+
+    #[test]
+    fn tools_do_not_expose_the_store_root_or_configuration_path() {
+        for tool in tools().as_array().unwrap() {
+            let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+            assert!(
+                !properties.contains_key("store") && !properties.contains_key("config"),
+                "{} still exposes a filesystem argument",
+                tool["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_arguments_are_rejected_rather_than_ignored() {
+        for (tool, argument) in [
+            ("kahea_invoke", "store"),
+            ("kahea_invoke", "config"),
+            ("kahea_plan", "store"),
+            ("kahea_plan", "config"),
+            ("kahea_explain", "store"),
+        ] {
+            let error = reject_undeclared_arguments(tool, &json!({argument: "/tmp/elsewhere"}))
+                .expect_err(tool);
+            assert!(
+                matches!(&error, McpError::Invalid(message) if message.contains(argument)),
+                "{tool} accepted {argument}"
+            );
+        }
+        assert!(
+            reject_undeclared_arguments("kahea_invoke", &json!({"plan":"plan:0123456789ab"}))
+                .is_ok()
+        );
+        assert!(reject_undeclared_arguments("kahea_unknown", &json!({"anything":1})).is_ok());
+    }
+
+    #[test]
     fn tool_failures_are_mcp_tool_results_not_protocol_errors() {
-        let response = dispatch(&json!({
-            "jsonrpc":"2.0",
-            "id":7,
-            "method":"tools/call",
-            "params":{"name":"kahea_inspect","arguments":{}}
-        }))
+        let response = dispatch(
+            &ServerOptions::default(),
+            &json!({
+                "jsonrpc":"2.0",
+                "id":7,
+                "method":"tools/call",
+                "params":{"name":"kahea_inspect","arguments":{}}
+            }),
+        )
         .unwrap();
         assert_eq!(response["result"]["isError"], true);
         assert!(response.get("error").is_none());

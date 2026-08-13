@@ -182,6 +182,12 @@ enum McpCommand {
     Serve {
         #[arg(long, default_value_t = true)]
         stdio: bool,
+        /// Store root every tool call reads and writes. Tool arguments cannot relocate it.
+        #[arg(long, default_value = ".kahea")]
+        store: PathBuf,
+        /// Configuration file whose policy every plan is measured against.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -751,7 +757,12 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             write_envelope(&explanation).map(|()| 0).map_err(io_error)
         }
         Command::Mcp {
-            command: McpCommand::Serve { stdio },
+            command:
+                McpCommand::Serve {
+                    stdio,
+                    store,
+                    config,
+                },
         } => {
             if !stdio {
                 return Err(CliError {
@@ -760,11 +771,13 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     exit: 2,
                 });
             }
-            kahea_mcp::serve_stdio().map_err(|error| CliError {
-                code: "mcp-server-failed",
-                message: error.to_string(),
-                exit: 2,
-            })?;
+            kahea_mcp::serve_stdio(kahea_mcp::ServerOptions { store, config }).map_err(
+                |error| CliError {
+                    code: "mcp-server-failed",
+                    message: error.to_string(),
+                    exit: 2,
+                },
+            )?;
             Ok(0)
         }
     }

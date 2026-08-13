@@ -90,9 +90,14 @@ fn invoke_websocket(plan: &str, grants: &[String], store: &Path) -> std::process
     Command::new(binary()).args(arguments).output().unwrap()
 }
 
-fn mcp_exchange(requests: &[Value]) -> Vec<Value> {
+fn mcp_exchange_in(store: Option<&Path>, requests: &[Value]) -> Vec<Value> {
+    let mut arguments = vec!["mcp".to_owned(), "serve".to_owned()];
+    if let Some(store) = store {
+        arguments.push("--store".into());
+        arguments.push(store.display().to_string());
+    }
     let mut child = Command::new(binary())
-        .args(["mcp", "serve"])
+        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -115,6 +120,24 @@ fn mcp_exchange(requests: &[Value]) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn mcp_exchange(requests: &[Value]) -> Vec<Value> {
+    mcp_exchange_in(None, requests)
+}
+
+fn mcp_call_in(store: &Path, id: u64, name: &str, arguments: Value) -> Value {
+    mcp_exchange_in(
+        Some(store),
+        &[json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "method":"tools/call",
+            "params":{"name":name,"arguments":arguments}
+        })],
+    )
+    .pop()
+    .unwrap()
 }
 
 fn mcp_call(id: u64, name: &str, arguments: Value) -> Value {
@@ -193,30 +216,16 @@ fn cli_and_mcp_plans_are_semantically_identical() {
         store.to_str().unwrap(),
     ]);
 
-    let request = json!({
-        "jsonrpc":"2.0",
-        "id":1,
-        "method":"tools/call",
-        "params":{
-            "name":"kahea_plan",
-            "arguments":{
-                "source":source,
-                "operation":"createInvoice",
-                "input":serde_json::from_slice::<Value>(&std::fs::read(input).unwrap()).unwrap(),
-                "store":store
-            }
-        }
-    });
-    let mut child = Command::new(binary())
-        .args(["mcp", "serve"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let response = mcp_call_in(
+        &store,
+        1,
+        "kahea_plan",
+        json!({
+            "source":source,
+            "operation":"createInvoice",
+            "input":serde_json::from_slice::<Value>(&std::fs::read(input).unwrap()).unwrap(),
+        }),
+    );
     assert_eq!(response["result"]["structuredContent"], cli);
     std::fs::remove_dir_all(store).unwrap();
 }
@@ -297,24 +306,25 @@ fn websocket_mcp_lists_strict_tools_resources_and_matches_cli_planning() {
     assert_eq!(mcp_index["result"]["isError"], false);
 
     let cli_plan = plan_websocket(&source, &store);
-    let mcp_plan = mcp_call(
+    let mcp_plan = mcp_call_in(
+        &store,
         5,
         "kahea_plan",
-        json!({"source":source,"operation":"cliSession","store":store}),
+        json!({"source":source,"operation":"cliSession"}),
     );
     assert_eq!(mcp_plan["result"]["structuredContent"], cli_plan);
     let fallback: Value =
         serde_json::from_str(mcp_plan["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(fallback, cli_plan);
 
-    let override_attempt = mcp_call(
+    let override_attempt = mcp_call_in(
+        &store,
         6,
         "kahea_plan",
         json!({
             "source":source,
             "operation":"cliSession",
             "server":"ws://attacker.example.test/socket",
-            "store":store
         }),
     );
     assert_eq!(override_attempt["result"]["isError"], true);
@@ -324,6 +334,25 @@ fn websocket_mcp_lists_strict_tools_resources_and_matches_cli_planning() {
             .unwrap()
             .contains("WebSocket sessions seal target")
     );
+
+    let relocation_attempt = mcp_call_in(
+        &store,
+        7,
+        "kahea_plan",
+        json!({
+            "source":source,
+            "operation":"cliSession",
+            "store":root.join("elsewhere"),
+        }),
+    );
+    assert_eq!(relocation_attempt["result"]["isError"], true);
+    assert!(
+        relocation_attempt["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("does not accept the argument \"store\"")
+    );
+    assert!(!root.join("elsewhere").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -527,14 +556,14 @@ fn mixed_arazzo_plan_exposes_sealed_websocket_steps_and_exact_aggregate_grants()
     }
     assert!(plan["websocket_policy_fingerprint"].as_str().is_some());
     let mcp_store = scratch("arazzo-websocket-mcp");
-    let mcp = mcp_call(
+    let mcp = mcp_call_in(
+        &mcp_store,
         41,
         "kahea_plan",
         json!({
             "source":source,
             "operation":"createAndPublishInvoice",
             "input":serde_json::from_slice::<Value>(&std::fs::read(&input).unwrap()).unwrap(),
-            "store":mcp_store
         }),
     );
     assert_eq!(mcp["result"]["structuredContent"], plan);
@@ -585,30 +614,16 @@ fn cli_and_mcp_conformance_campaigns_are_semantically_identical() {
     assert_eq!(cli["kind"], "conformance-plan");
     assert_eq!(cli["cases"].as_array().unwrap().len(), 6);
 
-    let request = json!({
-        "jsonrpc":"2.0",
-        "id":1,
-        "method":"tools/call",
-        "params":{
-            "name":"kahea_plan",
-            "arguments":{
-                "source":source,
-                "operation":"createInvoice",
-                "conformance":{"cases":6,"seed":42,"mode":"mixed"},
-                "store":store
-            }
-        }
-    });
-    let mut child = Command::new(binary())
-        .args(["mcp", "serve"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let response = mcp_call_in(
+        &store,
+        1,
+        "kahea_plan",
+        json!({
+            "source":source,
+            "operation":"createInvoice",
+            "conformance":{"cases":6,"seed":42,"mode":"mixed"},
+        }),
+    );
     assert_eq!(response["result"]["structuredContent"], cli);
     std::fs::remove_dir_all(store).unwrap();
 }
@@ -745,10 +760,11 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
             500,
         ),
     );
-    let planned = mcp_call(
+    let planned = mcp_call_in(
+        &store,
         1,
         "kahea_plan",
-        json!({"source":source,"operation":"cliSession","store":store}),
+        json!({"source":source,"operation":"cliSession"}),
     );
     let plan = &planned["result"]["structuredContent"];
     assert_eq!(plan["kind"], "websocket-plan");
@@ -766,10 +782,11 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
     let cli_denied = invoke_websocket(plan["id"].as_str().unwrap(), &denied_grants, &store);
     assert_eq!(cli_denied.status.code(), Some(4));
     let cli_denied: Value = serde_json::from_slice(&cli_denied.stdout).unwrap();
-    let mcp_denied = mcp_call(
+    let mcp_denied = mcp_call_in(
+        &store,
         2,
         "kahea_invoke",
-        json!({"plan":plan["id"],"grants":denied_grants,"store":store}),
+        json!({"plan":plan["id"],"grants":denied_grants}),
     );
     assert_eq!(mcp_denied["result"]["structuredContent"], cli_denied);
     assert_eq!(mcp_denied["result"]["structuredContent"]["exit"], 4);
@@ -788,10 +805,11 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
     let cli_output = invoke_websocket(plan["id"].as_str().unwrap(), &grants, &store);
     assert_eq!(cli_output.status.code(), Some(0));
     let cli_observation: Value = serde_json::from_slice(&cli_output.stdout).unwrap();
-    let mcp_output = mcp_call(
+    let mcp_output = mcp_call_in(
+        &store,
         3,
         "kahea_invoke",
-        json!({"plan":plan["id"],"grants":grants,"store":store}),
+        json!({"plan":plan["id"],"grants":grants}),
     );
     assert_eq!(mcp_output["result"]["isError"], false);
     let mcp_observation = mcp_output["result"]["structuredContent"].clone();
@@ -807,13 +825,13 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
     assert_eq!(fallback, mcp_observation);
     server.join().unwrap();
 
-    let explanation = mcp_call(
+    let explanation = mcp_call_in(
+        &store,
         4,
         "kahea_explain",
         json!({
             "handle":mcp_observation["transcript"],
             "select":"/entries/1/check",
-            "store":store
         }),
     );
     assert_eq!(explanation["result"]["isError"], false);
@@ -960,13 +978,13 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
             500,
         ),
     );
-    let expectation_plan = mcp_call(
+    let expectation_plan = mcp_call_in(
+        &expectation_store,
         1,
         "kahea_plan",
         json!({
             "source":expectation_source,
             "operation":"cliSession",
-            "store":expectation_store
         }),
     )["result"]["structuredContent"]
         .clone();
@@ -981,13 +999,13 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
         let mut socket = tungstenite::accept(stream).unwrap();
         socket.send(Message::Text("unexpected".into())).unwrap();
     });
-    let failed = mcp_call(
+    let failed = mcp_call_in(
+        &expectation_store,
         2,
         "kahea_invoke",
         json!({
             "plan":expectation_plan["id"],
             "grants":expectation_grants,
-            "store":expectation_store
         }),
     );
     assert_eq!(failed["result"]["structuredContent"]["exit"], 1);
@@ -1013,10 +1031,11 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
             40,
         ),
     );
-    let timeout_plan = mcp_call(
+    let timeout_plan = mcp_call_in(
+        &timeout_store,
         3,
         "kahea_plan",
-        json!({"source":timeout_source,"operation":"cliSession","store":timeout_store}),
+        json!({"source":timeout_source,"operation":"cliSession"}),
     )["result"]["structuredContent"]
         .clone();
     let timeout_grants: Vec<String> = timeout_plan["required_grants"]
@@ -1031,10 +1050,11 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
         let _socket = tungstenite::accept(stream).unwrap();
         timeout_done_rx.recv().unwrap();
     });
-    let timed_out = mcp_call(
+    let timed_out = mcp_call_in(
+        &timeout_store,
         4,
         "kahea_invoke",
-        json!({"plan":timeout_plan["id"],"grants":timeout_grants,"store":timeout_store}),
+        json!({"plan":timeout_plan["id"],"grants":timeout_grants}),
     );
     timeout_done_tx.send(()).unwrap();
     assert_eq!(timed_out["result"]["structuredContent"]["exit"], 3);

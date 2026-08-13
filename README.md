@@ -358,7 +358,13 @@ Exports recursively include referenced evidence in a self-contained JSON bundle.
 
 ```bash
 kahea mcp serve --stdio
+kahea mcp serve --stdio --store .kahea-local --config .kahea-local/config.toml
 ```
+
+The store root and the configuration file are process arguments. No tool argument can relocate the
+store, name a different configuration, or reach a filesystem path: `kahea_invoke` accepts sealed plan
+handles only, and a call carrying an undeclared argument is rejected rather than silently ignored.
+The CLI keeps accepting plan file paths, because an operator types those.
 
 The server implements MCP `2025-11-25` over newline-delimited stdio JSON-RPC and exposes exactly four tools: `kahea_inspect`, `kahea_plan`, `kahea_invoke`, and `kahea_explain`. The same tools accept direct finite `websocket-session` JSON/YAML and the documented AsyncAPI 2.6/3.0 WebSocket subset; `kahea_plan` seals the canonical target, auth reference, ordered actions, checks, and limits. `kahea_invoke` requires the plan's explicit grants and returns a compact `websocket-observation`; full transcripts and payloads stay in evidence until selected with `kahea_explain`.
 

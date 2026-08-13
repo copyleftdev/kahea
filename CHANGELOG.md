@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking (MCP surface):** removed the `store` and `config` tool arguments. The store root and
+  the configuration file are now process arguments of `kahea mcp serve --store/--config`, defaulting
+  to the previous `.kahea` and `.kahea/config.toml`, so a tool call can no longer relocate the store
+  or choose the policy its plans are measured against. The CLI is unchanged.
+- **Breaking (MCP surface):** `kahea_invoke` and the `kahea://plan/{handle}` resource accept sealed
+  plan handles only. Filesystem paths are rejected before any read, a resolved handle is confined to
+  the pinned store through canonicalization, and every unresolved reference returns one message that
+  does not report whether the target existed, parsed, or verified. `kahea invoke <plan.json>` on the
+  CLI still accepts a path.
+- **Breaking (MCP surface):** a tool call carrying an argument the tool does not declare is now
+  rejected instead of silently ignored, so calls written against the previous schema fail loudly.
+- Recorded [ADR-0002](docs/architecture/0002-mcp-filesystem-boundary.md) and closed the reported
+  `kahea_invoke.plan` to `fs::read` path ([#32](https://github.com/copyleftdev/kahea/issues/32)).
+
 ## 0.2.0 - 2026-08-09
 
 - Added a complete finite WebSocket release guide covering the direct session format, controlled

@@ -108,19 +108,22 @@ Any MCP client can start the same binary over stdio:
   "mcpServers": {
     "kahea": {
       "command": "kahea",
-      "args": ["mcp", "serve", "--stdio"]
+      "args": ["mcp", "serve", "--stdio", "--store", ".kahea-local"]
     }
   }
 }
 ```
 
+The store root is a process argument. Tool calls cannot relocate it, and `kahea_invoke` accepts only
+sealed plan handles, never filesystem paths.
+
 Use the same order and review boundary through the four tools:
 
 ```json
 {"name":"kahea_inspect","arguments":{"source":"session.json"}}
-{"name":"kahea_plan","arguments":{"source":"session.json","operation":"oracleSession","store":".kahea-local"}}
-{"name":"kahea_invoke","arguments":{"plan":"plan:HANDLE","grants":["net:127.0.0.1:PORT","net-cidr:127.0.0.1/32","net-insecure-websocket","websocket:connect"],"store":".kahea-local"}}
-{"name":"kahea_explain","arguments":{"handle":"transcript:HANDLE","select":"/entries/0","store":".kahea-local"}}
+{"name":"kahea_plan","arguments":{"source":"session.json","operation":"oracleSession"}}
+{"name":"kahea_invoke","arguments":{"plan":"plan:HANDLE","grants":["net:127.0.0.1:PORT","net-cidr:127.0.0.1/32","net-insecure-websocket","websocket:connect"]}}
+{"name":"kahea_explain","arguments":{"handle":"transcript:HANDLE","select":"/entries/0"}}
 ```
 
 The plan call returns the authoritative target, risk, grants, secret references, limits, and
@@ -156,6 +159,17 @@ names only.
   secret values are resolved at invocation and are not written to plans or observations.
 - Origins are normalized and subprotocol preference order is sealed. Optional allowlists can deny
   either before network access. Extensions are denied; negotiated compression is not accepted.
+
+### Filesystem boundary on the MCP surface
+
+- The store root and the configuration file are process arguments of `kahea mcp serve`. A tool call
+  cannot relocate the store or choose the configuration whose policy fingerprint measures its plans.
+- `kahea_invoke` and the `kahea://plan/{handle}` resource accept sealed plan handles only. A handle
+  resolves inside the pinned store or the call is denied before anything is read.
+- A tool call carrying an argument the tool does not declare is rejected, so a call written against
+  an older schema fails loudly instead of meaning something narrower than it says.
+- Every way a plan handle fails to resolve returns one message. Absence, unreadability, malformed
+  JSON, and a broken seal are indistinguishable to the caller.
 
 ### Bounded execution and evidence
 
