@@ -365,6 +365,7 @@ fn yaml_mapping_key_to_string(key: Yaml, location: &str) -> Result<String, Inges
     match key {
         Yaml::String(value) => Ok(value),
         Yaml::Integer(value) => Ok(value.to_string()),
+        Yaml::Real(value) if !value.contains(['.', 'e', 'E']) => Ok(value),
         Yaml::Real(value) if value.parse::<f64>().is_ok_and(f64::is_finite) => Ok(value),
         _ => Err(IngestError::Parse(format!(
             "non-string mapping key at {location}"
@@ -603,6 +604,25 @@ paths:
             inspect_openapi(Path::new("status-keys.yaml"), spec.as_bytes(), None, 50, 0).unwrap();
         assert_eq!(index.operations.len(), 1);
         assert_eq!(index.operations[0].3, "getToken");
+    }
+
+    #[test]
+    fn oversized_integer_yaml_mapping_keys_are_preserved_as_strings() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Large key, version: 1.0.0 }
+paths:
+  /token:
+    post:
+      operationId: getToken
+      responses:
+        1234567890123456789012345678901234567890: { description: impossible but finite }
+"#;
+        let source = load_openapi(Path::new("large-key.yaml"), spec.as_bytes()).unwrap();
+        let responses = source.document["paths"]["/token"]["post"]["responses"]
+            .as_object()
+            .unwrap();
+        assert!(responses.contains_key("1234567890123456789012345678901234567890"));
     }
 
     #[test]
