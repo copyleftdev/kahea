@@ -220,6 +220,7 @@ impl<S: Write> Write for AccountedStream<S> {
 pub struct WebSocketConnection {
     pub metadata: WebSocketHandshakeMetadata,
     socket: Socket,
+    cancellation: Option<Arc<AtomicBool>>,
     deadline: Arc<Mutex<DeadlineState>>,
     started: Instant,
     total_deadline: Instant,
@@ -243,6 +244,12 @@ impl WebSocketCancellation {
 }
 
 impl WebSocketConnection {
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    }
+
     pub fn is_open(&self) -> bool {
         self.socket.can_read() || self.socket.can_write()
     }
@@ -504,6 +511,7 @@ fn connect_websocket_resolving_cancellable(
         connect_deadline,
         WebSocketTerminalCause::ConnectTimeout,
     )));
+    let cancellation_handle = cancellation.clone();
     let stream = DeadlineTcpStream::new(stream, Arc::clone(&deadline_handle), cancellation);
     let config = websocket_config(plan)?;
     let stream = match websocket_stream(stream, &target, tls) {
@@ -589,6 +597,7 @@ fn connect_websocket_resolving_cancellable(
         WebSocketConnection {
             metadata,
             socket,
+            cancellation: cancellation_handle,
             deadline: deadline_handle,
             started,
             total_deadline,
@@ -1036,11 +1045,6 @@ fn read_expectation(
                         exit: 1,
                         close: Some(close),
                     }),
-                    ClosePrecedence::NotAcknowledged => Err(socket_error(
-                        connection,
-                        acknowledged.expect_err("only reached when the flush failed"),
-                        timeout_cause,
-                    )),
                 };
             }
             Message::Frame(frame) => {
@@ -1351,22 +1355,24 @@ fn sync_wire_counters(
 enum ClosePrecedence {
     Accepted,
     Rejected,
-    NotAcknowledged,
 }
 
 /// What to report when the peer's close frame has been read and acknowledging it may have failed.
 ///
-/// The verdict is settled the moment the frame is read; the acknowledgement is courtesy. A peer that
+/// The close frame decides, and only the close frame. Acknowledging it is courtesy: a peer that
 /// closes with our bytes still unread resets the connection, and that reset surfaces on the
-/// acknowledging write rather than on the read that already told us what happened. Reporting the I/O
-/// error would replace the diagnosis the operator needs — an unacceptable close code — with the
-/// failure to reply to it, and would do so only on the runs where the reset won the race. An I/O
-/// failure is reported only when there is no verdict of its own to report.
-const fn close_precedence(matched: bool, acknowledged: bool) -> ClosePrecedence {
-    match (matched, acknowledged) {
-        (false, _) => ClosePrecedence::Rejected,
-        (true, true) => ClosePrecedence::Accepted,
-        (true, false) => ClosePrecedence::NotAcknowledged,
+/// acknowledging write rather than on the read that already told us what happened.
+///
+/// `acknowledged` is a parameter and then ignored on purpose. An earlier version let a failed
+/// acknowledgement turn an accepted close into an I/O failure, which reported a session that met
+/// every expectation and received a close its plan accepted as though it had broken — on exactly the
+/// runs where the peer's reset won the race. Whether our reply landed is recorded in the transcript,
+/// where it belongs; it is not a verdict about the session.
+const fn close_precedence(matched: bool, _acknowledged: bool) -> ClosePrecedence {
+    if matched {
+        ClosePrecedence::Accepted
+    } else {
+        ClosePrecedence::Rejected
     }
 }
 
@@ -1391,7 +1397,14 @@ fn socket_error(
     }
     match error {
         WebSocketError::Io(error) if error.kind() == io::ErrorKind::Interrupted => {
-            SessionTerminal::error(WebSocketTerminalCause::Cancelled)
+            // The deadline stream retries a bare signal, so an interruption reaching here came from
+            // the cancellation path. Report it as cancelled only if cancellation was in fact
+            // requested; otherwise a stray signal would be reported as a decision the caller made.
+            if interruption_is_cancellation(connection.cancellation_requested()) {
+                SessionTerminal::error(WebSocketTerminalCause::Cancelled)
+            } else {
+                SessionTerminal::error(WebSocketTerminalCause::IoFailure)
+            }
         }
         WebSocketError::Io(error)
             if matches!(
@@ -2440,6 +2453,31 @@ impl DeadlineTcpStream {
         })
     }
 
+    /// Confirm a reported timeout against the clock before treating it as one.
+    ///
+    /// `SO_RCVTIMEO` expiry and a spurious `EAGAIN` arrive as the same error, and the platforms do
+    /// not agree on when each happens. Ending a session on the errno alone reports a deadline that
+    /// has not passed: the observation says the peer ran out of time when it had seconds left. Ask
+    /// the clock instead, and only stop when the deadline is genuinely gone.
+    ///
+    /// The pause bounds the retry: a socket that reports readiness it does not have would otherwise
+    /// spin until the deadline rather than wait for it.
+    fn await_deadline(&self) -> io::Result<()> {
+        let before = Instant::now();
+        self.remaining()?;
+        if before.elapsed() < Duration::from_millis(1) {
+            std::thread::sleep(Duration::from_millis(1));
+            self.remaining()?;
+        }
+        Ok(())
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    }
+
     fn note_activity(&self) -> io::Result<()> {
         self.deadline
             .lock()
@@ -2460,8 +2498,12 @@ impl Read for DeadlineTcpStream {
                     }
                     return Ok(read);
                 }
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.await_deadline()?;
+                }
                 Err(error)
-                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && !interruption_is_cancellation(self.cancellation_requested()) =>
                 {
                     self.remaining()?;
                 }
@@ -2482,8 +2524,12 @@ impl Write for DeadlineTcpStream {
                     }
                     return Ok(written);
                 }
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.await_deadline()?;
+                }
                 Err(error)
-                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && !interruption_is_cancellation(self.cancellation_requested()) =>
                 {
                     self.remaining()?;
                 }
@@ -2497,8 +2543,12 @@ impl Write for DeadlineTcpStream {
             self.stream.set_write_timeout(Some(self.remaining()?))?;
             match self.stream.flush().map_err(normalize_timeout) {
                 Ok(()) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.await_deadline()?;
+                }
                 Err(error)
-                    if error.kind() == io::ErrorKind::TimedOut && self.cancellation.is_some() =>
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && !interruption_is_cancellation(self.cancellation_requested()) =>
                 {
                     self.remaining()?;
                 }
@@ -2506,6 +2556,16 @@ impl Write for DeadlineTcpStream {
             }
         }
     }
+}
+
+/// Whether an interrupted syscall means this session was cancelled.
+///
+/// `EINTR` says a signal arrived while the thread was blocked. It says nothing about the session:
+/// no deadline passed, no peer acted, nothing was decided. Only the caller's cancellation flag can
+/// make an interruption meaningful, and the flag is the thing to ask — the errno is the same either
+/// way, which is why this is a function and not a match arm.
+const fn interruption_is_cancellation(cancellation_requested: bool) -> bool {
+    cancellation_requested
 }
 
 fn normalize_timeout(error: io::Error) -> io::Error {
@@ -3145,6 +3205,100 @@ mod tests {
         remove_temporary_store(&root);
     }
 
+    /// A peer that resets right after an acceptable close still ran an acceptable session.
+    ///
+    /// The server sends its close and drops the socket without draining, which is what macOS turns
+    /// into a reset on the acknowledging write. Every expectation was met and the close code is one
+    /// the plan accepts, so the session completed.
+    #[test]
+    fn an_accepted_close_survives_a_peer_that_vanishes_before_the_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut plan = ws_plan(&listener);
+        plan.actions = vec![WebSocketAction::ExpectClose {
+            codes: vec![1000],
+            reason: None,
+            timeout_ms: None,
+        }];
+        let plan = plan.seal().unwrap();
+        let server = thread::spawn(move || {
+            let mut socket = tungstenite::accept(accept_test_connection(&listener)).unwrap();
+            socket
+                .write(Message::Frame(Frame::close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "".into(),
+                }))))
+                .unwrap();
+            socket.flush().unwrap();
+            drop(socket);
+        });
+        let (root, store) = store();
+        let WebSocketConnectResult::Observation(observation) =
+            execute_websocket(&plan, &options(&plan), &store).unwrap()
+        else {
+            panic!("an accepted close must produce an observation")
+        };
+        assert_eq!(
+            observation.terminal_cause,
+            WebSocketTerminalCause::Completed,
+            "exit={}",
+            observation.exit
+        );
+        assert_eq!(observation.exit, 0);
+        server.join().unwrap();
+        drop(store);
+        remove_temporary_store(&root);
+    }
+
+    /// A signal is not a decision, and only the caller's flag can make an interruption one.
+    ///
+    /// `EINTR` and a cancelled session arrive as the same `ErrorKind::Interrupted`, and the code
+    /// used to report both as `cancelled` — so a stray signal on a macOS runner ended a healthy
+    /// session with a terminal cause claiming the caller had asked for it.
+    #[test]
+    fn an_interrupted_syscall_is_only_cancellation_when_cancellation_was_requested() {
+        assert!(interruption_is_cancellation(true));
+        assert!(
+            !interruption_is_cancellation(false),
+            "a bare signal must not be reported as a cancelled session"
+        );
+    }
+
+    /// A socket that reports "would block" before the deadline must not end the session.
+    ///
+    /// A non-blocking socket reports exactly what a spurious wakeup reports, so this reproduces the
+    /// condition deterministically rather than waiting for a platform to produce it: the read is
+    /// answered late, and the stream has to wait for it instead of calling the deadline elapsed.
+    #[test]
+    fn a_would_block_before_the_deadline_is_not_a_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(150));
+            stream.write_all(b"late").unwrap();
+            stream.flush().unwrap();
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        // Every read now answers WouldBlock immediately until the data lands.
+        stream.set_nonblocking(true).unwrap();
+        let deadline = Arc::new(Mutex::new(DeadlineState::fixed(
+            Instant::now() + Duration::from_secs(5),
+            WebSocketTerminalCause::ActionTimeout,
+        )));
+        let mut deadline_stream = DeadlineTcpStream::new(stream, deadline, None);
+        let started = Instant::now();
+        let mut buffer = [0_u8; 4];
+        // read_exact, not read: a single read may legally return fewer bytes than the peer sent, and
+        // a short read would fail this test for a reason it is not about.
+        deadline_stream.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, b"late");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "the read returned before the data could have arrived"
+        );
+        server.join().unwrap();
+    }
+
     #[test]
     fn controlled_oracle_is_seeded_scripted_bounded_and_tls_capable() {
         let mut scenario = generate_websocket_scenario(0x51_0c_e7);
@@ -3164,11 +3318,17 @@ mod tests {
         else {
             panic!("seeded oracle must produce a terminal observation")
         };
-        assert_eq!(observation.exit, 0);
+        // Assert the cause before the exit code: the cause names which deadline or failure ended
+        // the session, and the exit code only says that one did. A bare `exit 0 != 3` tells an
+        // investigator nothing about where to look.
         assert_eq!(
             observation.terminal_cause,
-            WebSocketTerminalCause::Completed
+            WebSocketTerminalCause::Completed,
+            "seeded oracle ended early: exit={} counters={:?}",
+            observation.exit,
+            observation.counters
         );
+        assert_eq!(observation.exit, 0);
         assert_eq!(observation.negotiated_subprotocol, scenario.subprotocol);
         let oracle_observation = oracle.wait().unwrap();
         assert_eq!(oracle_observation.seed, scenario.seed);
@@ -3962,8 +4122,8 @@ mod tests {
         assert_eq!(close_precedence(true, true), ClosePrecedence::Accepted);
         assert_eq!(
             close_precedence(true, false),
-            ClosePrecedence::NotAcknowledged,
-            "with nothing to report about the close itself, the I/O failure is the result"
+            ClosePrecedence::Accepted,
+            "a peer that vanishes after an acceptable close still ran an acceptable session"
         );
         for acknowledged in [true, false] {
             assert_eq!(
