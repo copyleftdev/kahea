@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 - 2026-08-13
+
+- Fixed YAML ingestion for OpenAPI documents that use unquoted numeric response status keys.
+  Finite numeric mapping keys are normalized to strings before indexing, while unsupported keys
+  such as booleans still fail closed ([#42](https://github.com/copyleftdev/kahea/issues/42)).
+
 ## 0.3.0 - 2026-08-13
 
 - **Breaking (`kahea/k1`):** a close frame the plan does not accept is reported as

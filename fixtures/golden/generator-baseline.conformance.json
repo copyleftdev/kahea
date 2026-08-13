@@ -376,7 +376,7 @@
         "target": "https://api.example.test/surface/7777?count=40&kind=gamma&verbose=true"
       }
     ],
-    "fingerprint": "b3:9c2853190ab0d53916751f05635e7facbed87ca918bc94942e33b1d79cc07e9f",
+    "fingerprint": "b3:048e0480efda2d49de0360a5ca9341b923ed465d038416215d30cd5f6b39c522",
     "requested_cases": 6,
     "required_grants": [
       "conformance:execute:6",
@@ -558,7 +558,7 @@
         "target": "https://api.example.test/optional?trace=a"
       }
     ],
-    "fingerprint": "b3:d1e994af668e396329bfc18d7082480bbabe824f62d9cc64ed61e21ca68db401",
+    "fingerprint": "b3:20c128b11c9d836d9c8ddf5b230cea18574c96d8019693b791f50996439bbda5",
     "requested_cases": 10,
     "required_grants": [
       "conformance:execute:10",
