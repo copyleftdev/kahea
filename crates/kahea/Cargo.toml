@@ -26,4 +26,5 @@ kahea-workflow = { path = "../kahea-workflow" }
 serde_json.workspace = true
 
 [dev-dependencies]
+kahea-test-server = { path = "../kahea-test-server" }
 tungstenite.workspace = true

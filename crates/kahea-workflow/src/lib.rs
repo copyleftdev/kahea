@@ -1976,6 +1976,7 @@ fn value_array(value: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kahea_test_server::remove_temporary_store;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
@@ -2197,7 +2198,7 @@ paths:
         assert_eq!(observation.steps[0].attempts.len(), 2);
         server.join().unwrap();
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2403,7 +2404,7 @@ paths:
             .contains("unsupported WebSocket workflow output")
         );
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2452,7 +2453,7 @@ paths:
             );
         }
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2561,7 +2562,7 @@ paths:
         http_worker.join().unwrap();
         websocket_worker.join().unwrap();
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2650,6 +2651,6 @@ paths:
         first_worker.join().unwrap();
         second_worker.join().unwrap();
         drop(evidence);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 }

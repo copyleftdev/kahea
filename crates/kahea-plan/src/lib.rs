@@ -2341,6 +2341,7 @@ pub fn load_websocket_plan(root: &Path, reference: &str) -> Result<WebSocketPlan
 mod tests {
     use super::*;
     use kahea_ingest::{load_openapi, resolve_operation};
+    use kahea_test_server::remove_temporary_store;
     use serde_json::json;
 
     const SPEC: &str = r#"
@@ -3244,7 +3245,7 @@ actions:
             load_websocket_plan(&root, &plan.id),
             Err(PlanError::InvalidSeal)
         ));
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
 
         configuration.auth.get_mut("chat-sandbox").unwrap().token = Some("inline-secret".into());
         assert!(matches!(
@@ -3439,7 +3440,7 @@ paths:
             .decode(body.inline)
             .unwrap();
         assert!(wire.windows(4).any(|window| window == [0, 1, 2, 255]));
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3477,7 +3478,7 @@ paths:
         )
         .unwrap();
         assert!(ProjectConfiguration::load(&path).is_err());
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3760,7 +3761,7 @@ paths:
             load_plan(&root, &plan.id),
             Err(PlanError::InvalidSeal)
         ));
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]

@@ -12,8 +12,9 @@ pub use websocket::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,6 +23,30 @@ use thiserror::Error;
 use url::Url;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// Remove a directory a test created for itself, without failing the test if it cannot be removed.
+///
+/// On Windows a file can stay undeletable for a moment after its last handle closes: SQLite keeps
+/// WAL and shm siblings, and virus scanning and the search indexer both hold files open behind the
+/// process's back. `remove_dir_all` then returns a sharing violation. That happens during cleanup,
+/// after every assertion the test exists to make has already passed, so treating it as a failure
+/// turns a green test into a red build over a directory the operating system will collect anyway.
+///
+/// Retry briefly for the transient case, then leave it. A leaked temporary directory on a CI runner
+/// costs nothing; a spurious red build costs a re-run and a diagnosis.
+pub fn remove_temporary_store(path: impl AsRef<Path>) {
+    const ATTEMPTS: u32 = 40;
+    const BACKOFF: Duration = Duration::from_millis(50);
+    let path = path.as_ref();
+    for attempt in 1..=ATTEMPTS {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(_) if attempt < ATTEMPTS => thread::sleep(BACKOFF),
+            Err(_) => return,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

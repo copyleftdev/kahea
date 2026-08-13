@@ -16,6 +16,7 @@ use kahea_evidence::EvidenceStore;
 use kahea_exec::InvokeOptions;
 use kahea_ingest::{OpenApiSource, OperationDefinition, load_openapi, resolve_operation};
 use kahea_plan::ProjectConfiguration;
+use kahea_test_server::remove_temporary_store;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -425,5 +426,5 @@ fn a_cookie_aware_server_accepts_the_positives_and_rejects_the_mutations() {
     assert_eq!(server.seen.load(Ordering::SeqCst), observation.executed);
 
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }

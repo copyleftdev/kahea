@@ -6,6 +6,7 @@ use kahea_core::digest;
 use kahea_ingest::{
     IngestError, inspect_source, load_source, read_source_artifact, resolve_operation,
 };
+use kahea_test_server::remove_temporary_store;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -448,7 +449,7 @@ fn postman_v3_unknown_resources_block_only_their_own_request() {
         "pre-existing example absence disappeared"
     );
 
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -465,7 +466,7 @@ fn postman_v3_directories_are_bounded_and_reject_traversal() {
         read_source_artifact(&empty).is_err(),
         "a directory without request files was accepted"
     );
-    fs::remove_dir_all(empty).unwrap();
+    remove_temporary_store(&empty);
 
     #[cfg(unix)]
     {
@@ -477,5 +478,5 @@ fn postman_v3_directories_are_bounded_and_reject_traversal() {
         );
     }
 
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }

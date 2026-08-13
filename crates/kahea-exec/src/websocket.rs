@@ -2525,6 +2525,7 @@ mod tests {
         PlannedAuth, PlannedHeader, RiskClass, WebSocketAction, WebSocketLimits,
         default_config_fingerprint, digest,
     };
+    use kahea_test_server::remove_temporary_store;
     use kahea_test_server::{
         WebSocketFaultMode, WebSocketOracleTransport, generate_websocket_scenario,
         start_websocket_oracle, start_websocket_oracle_on,
@@ -2773,7 +2774,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2833,7 +2834,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2877,7 +2878,7 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -2937,7 +2938,7 @@ mod tests {
             WebSocketTerminalCause::DnsFailure
         ));
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3039,7 +3040,7 @@ mod tests {
         drop(connection);
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3093,7 +3094,7 @@ mod tests {
         ));
         let _ = extension_server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3147,7 +3148,7 @@ mod tests {
         ));
         silent_server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3181,7 +3182,7 @@ mod tests {
         assert_eq!(oracle_observation.completed_steps, scenario.steps.len());
         assert_eq!(oracle_observation.outcome, "completed");
         drop(evidence_store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
 
         let mut tls_scenario = generate_websocket_scenario(0x715);
         tls_scenario.expected_origin = None;
@@ -3222,7 +3223,7 @@ mod tests {
         assert_eq!(observation.exit, 0);
         assert_eq!(tls_oracle.wait().unwrap().completed_steps, 1);
         drop(tls_store);
-        fs::remove_dir_all(tls_root).unwrap();
+        remove_temporary_store(&tls_root);
     }
 
     #[test]
@@ -3311,7 +3312,7 @@ mod tests {
             );
             assert_eq!(oracle_observation.connections, 1);
             drop(store);
-            fs::remove_dir_all(root).unwrap();
+            remove_temporary_store(&root);
         }
     }
 
@@ -3334,11 +3335,14 @@ mod tests {
         idle_plan
             .required_grants
             .push("net-insecure-websocket".into());
-        idle_plan.limits.connect_timeout_ms = 200;
+        // Only the idle deadline is under test, so every other budget is generous. A connect budget
+        // tight enough to expire on a loaded runner makes this assert the wrong deadline and fail
+        // for a reason that has nothing to do with idleness.
+        idle_plan.limits.connect_timeout_ms = 5_000;
         idle_plan.limits.action_timeout_ms = 200;
         idle_plan.limits.idle_timeout_ms = 50;
         idle_plan.limits.close_timeout_ms = 200;
-        idle_plan.limits.total_timeout_ms = 500;
+        idle_plan.limits.total_timeout_ms = 5_000;
         idle_plan.actions = vec![
             WebSocketAction::ExpectText {
                 equals: "never".into(),
@@ -3367,7 +3371,7 @@ mod tests {
             "ws-0000000000000d1e-silent-frame"
         );
         drop(idle_store);
-        fs::remove_dir_all(idle_root).unwrap();
+        remove_temporary_store(&idle_root);
 
         let mut total_scenario = generate_websocket_scenario(0x707a1);
         total_scenario.expected_origin = None;
@@ -3431,7 +3435,7 @@ mod tests {
             "ws-00000000000707a1-none"
         );
         drop(total_store);
-        fs::remove_dir_all(total_root).unwrap();
+        remove_temporary_store(&total_root);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -3455,7 +3459,7 @@ mod tests {
             WebSocketTerminalCause::ConnectionFailure | WebSocketTerminalCause::ConnectTimeout
         ));
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3506,7 +3510,7 @@ mod tests {
         assert_eq!(observation.exit, 0);
         assert_eq!(oracle.wait().unwrap().completed_steps, 1);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3583,7 +3587,7 @@ mod tests {
         ));
         mismatch_server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3718,7 +3722,7 @@ mod tests {
         );
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3780,7 +3784,7 @@ mod tests {
         assert_eq!(observation.close.unwrap().reason, "finished");
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -3946,7 +3950,7 @@ mod tests {
         assert_files_absent(&root, SECRET.as_bytes());
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     /// The precedence rule itself, which is the part a socket test cannot pin down.
@@ -4031,7 +4035,7 @@ mod tests {
         );
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -4112,7 +4116,7 @@ mod tests {
         assert_eq!(observation.counters.inbound_frames, 1);
         budget_server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -4157,7 +4161,7 @@ mod tests {
             assert_eq!(observation.counters.inbound_frames, 0);
             server.join().unwrap();
             drop(store);
-            fs::remove_dir_all(root).unwrap();
+            remove_temporary_store(&root);
         }
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4199,7 +4203,7 @@ mod tests {
         assert_eq!(observation.counters.inbound_bytes, 1);
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -4312,6 +4316,6 @@ mod tests {
         canceller.join().unwrap();
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 }

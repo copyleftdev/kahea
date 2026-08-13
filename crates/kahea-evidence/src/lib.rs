@@ -495,11 +495,12 @@ fn select_xml(data: &[u8], selector: &str) -> Result<Option<Value>, EvidenceErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kahea_test_server::remove_temporary_store;
 
     #[test]
     fn blobs_are_content_addressed_and_round_trip() {
         let root = std::env::temp_dir().join(format!("kahea-evidence-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let first = store
             .put_blob("body", "application/json", br#"{"ok":true}"#, false)
@@ -510,14 +511,14 @@ mod tests {
         assert_eq!(first.handle, second.handle);
         assert_eq!(store.get(&first.handle).unwrap().data, br#"{"ok":true}"#);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
     fn explanation_supports_bounded_structured_selectors() {
         let root =
             std::env::temp_dir().join(format!("kahea-evidence-select-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let json = store
             .put_blob(
@@ -556,7 +557,7 @@ mod tests {
         let bytes = store.explain(&xml.handle, Some("bytes:0-4")).unwrap();
         assert_eq!(bytes.value.unwrap()["data"], json!("PHJvb3Q="));
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -565,7 +566,7 @@ mod tests {
             "kahea-evidence-selector-limits-{}",
             std::process::id()
         ));
-        let _ = fs::remove_dir_all(&root);
+        remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let json = store
             .put_json("body", &json!({"large": "x".repeat(64 * 1024)}), true)
@@ -594,14 +595,14 @@ mod tests {
             Err(EvidenceError::InvalidSelector(_))
         ));
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
     fn export_bundle_follows_evidence_handles() {
         let root =
             std::env::temp_dir().join(format!("kahea-evidence-export-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        remove_temporary_store(&root);
         let store = EvidenceStore::open(&root).unwrap();
         let body = store
             .put_blob("body", "application/json", br#"{"ok":true}"#, false)
@@ -614,6 +615,6 @@ mod tests {
         let bundle: Value = serde_json::from_slice(&fs::read(bundle_path).unwrap()).unwrap();
         assert_eq!(bundle["records"].as_object().unwrap().len(), 2);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 }

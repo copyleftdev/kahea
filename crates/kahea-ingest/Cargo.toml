@@ -18,4 +18,5 @@ url.workspace = true
 yaml-rust2.workspace = true
 
 [dev-dependencies]
+kahea-test-server = { path = "../kahea-test-server" }
 base64.workspace = true

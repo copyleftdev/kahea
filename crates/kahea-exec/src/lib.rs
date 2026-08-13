@@ -1188,6 +1188,7 @@ fn unsafe_ipv6(address: Ipv6Addr) -> bool {
 mod tests {
     use super::*;
     use kahea_core::{PlannedAuth, RiskClass};
+    use kahea_test_server::remove_temporary_store;
     use std::fs;
     use std::io::{ErrorKind, Write};
     use std::net::TcpListener;
@@ -1301,7 +1302,7 @@ mod tests {
         assert_eq!(result.exit(), 4);
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1335,7 +1336,7 @@ mod tests {
         let request = server.join().unwrap();
         assert!(request.contains("authorization: Bearer top-secret-value"));
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1352,7 +1353,7 @@ mod tests {
         assert_eq!(observation.response_schema.as_deref(), Some("failed"));
         server.join().unwrap();
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1368,7 +1369,7 @@ mod tests {
         ));
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1424,7 +1425,7 @@ mod tests {
                 .windows("never-persist".len())
                 .any(|window| window == b"never-persist")
         );
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1443,7 +1444,7 @@ mod tests {
         assert_eq!(denial.required, "net-cidr:127.0.0.1/32");
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1463,7 +1464,7 @@ mod tests {
         ));
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 
     #[test]
@@ -1500,6 +1501,6 @@ mod tests {
             ErrorKind::WouldBlock
         );
         drop(store);
-        fs::remove_dir_all(root).unwrap();
+        remove_temporary_store(&root);
     }
 }

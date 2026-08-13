@@ -10,6 +10,7 @@ use kahea_evidence::EvidenceStore;
 use kahea_exec::InvokeOptions;
 use kahea_ingest::{OpenApiSource, OperationDefinition, load_openapi, resolve_operation};
 use kahea_plan::{PlanOptions, ProjectConfiguration};
+use kahea_test_server::remove_temporary_store;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
@@ -416,7 +417,7 @@ fn a_substituted_or_corrupt_case_plan_is_rejected_before_any_request() {
     ));
 
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -452,7 +453,7 @@ fn a_campaign_planned_under_different_configuration_never_executes() {
     }
 
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -627,7 +628,7 @@ fn the_failure_bound_stops_execution_against_a_broken_server() {
     assert_eq!(server.served(), 3, "more requests were sent than executed");
 
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -680,7 +681,7 @@ fn a_permissive_server_fails_every_negative_case() {
     }
 
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
 
 #[test]
@@ -722,5 +723,5 @@ fn declared_pacing_is_applied_between_executed_cases() {
     );
 
     drop(evidence);
-    fs::remove_dir_all(root).unwrap();
+    remove_temporary_store(&root);
 }
