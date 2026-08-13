@@ -46,11 +46,13 @@ fn websocket_source(port: u16, actions: Value, action_timeout_ms: u64) -> Value 
         "url": format!("ws://127.0.0.1:{port}/socket"),
         "actions": actions,
         "limits": {
-            "connect_timeout_ms": 500,
+            // Only `action_timeout_ms` is ever asserted, by the callers that pass a small one. The
+            // rest are generous so a loaded runner cannot end a successful session early.
+            "connect_timeout_ms": 10_000,
             "action_timeout_ms": action_timeout_ms,
-            "idle_timeout_ms": 500,
-            "close_timeout_ms": 500,
-            "total_timeout_ms": 2_000,
+            "idle_timeout_ms": 10_000,
+            "close_timeout_ms": 10_000,
+            "total_timeout_ms": 30_000,
             "max_frame_bytes": 65_536,
             "max_message_bytes": 65_536,
             "max_inbound_frames": 16,
@@ -294,7 +296,7 @@ fn websocket_mcp_lists_strict_tools_resources_and_matches_cli_planning() {
         &websocket_source(
             listener.local_addr().unwrap().port(),
             json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let cli_index = output_json(&["inspect", source.to_str().unwrap()]);
@@ -646,7 +648,7 @@ fn websocket_cli_runs_the_sealed_session_and_explains_bounded_evidence() {
                 {"type":"expect-binary","payload_base64":"AgM=","timeout_ms":null},
                 {"type":"close","code":1000,"reason":"done"}
             ]),
-            500,
+            10_000,
         ),
     );
     let index = output_json(&["inspect", source.to_str().unwrap()]);
@@ -758,7 +760,7 @@ fn websocket_mcp_invokes_with_cli_parity_and_bounded_evidence() {
                 {"type":"expect-text","equals":"world","timeout_ms":null},
                 {"type":"close","code":1000,"reason":"done"}
             ]),
-            500,
+            10_000,
         ),
     );
     let planned = mcp_call_in(
@@ -860,7 +862,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
                 {"type":"expect-text","equals":"expected","timeout_ms":null},
                 {"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}
             ]),
-            500,
+            10_000,
         ),
     );
     let expectation_plan = plan_websocket(&expectation_source, &expectation_store);
@@ -933,7 +935,7 @@ fn websocket_cli_maps_expectation_timeout_and_handshake_failures() {
         &websocket_source(
             handshake_listener.local_addr().unwrap().port(),
             json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let handshake_plan = plan_websocket(&handshake_source, &handshake_store);
@@ -976,7 +978,7 @@ fn websocket_mcp_maps_failed_expectations_and_timeouts() {
                 {"type":"expect-text","equals":"expected","timeout_ms":null},
                 {"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}
             ]),
-            500,
+            10_000,
         ),
     );
     let expectation_plan = mcp_call_in(
@@ -1076,7 +1078,7 @@ fn websocket_cli_rejects_invalid_sources_and_unsealed_overrides() {
         &websocket_source(
             9,
             json!([{"type":"expect-text","equals":"missing terminal","timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let store = root.join("state");
@@ -1099,7 +1101,7 @@ fn websocket_cli_rejects_invalid_sources_and_unsealed_overrides() {
         &websocket_source(
             9,
             json!([{"type":"expect-close","codes":[1000],"reason":null,"timeout_ms":null}]),
-            500,
+            10_000,
         ),
     );
     let override_attempt = Command::new(binary())

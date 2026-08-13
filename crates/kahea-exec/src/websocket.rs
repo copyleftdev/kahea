@@ -2598,11 +2598,13 @@ mod tests {
             subprotocols: Vec::new(),
             handshake_checks: vec!["extensions:none".into(), "status:101".into()],
             limits: WebSocketLimits {
-                connect_timeout_ms: 1_000,
-                action_timeout_ms: 1_000,
-                idle_timeout_ms: 1_000,
-                close_timeout_ms: 1_000,
-                total_timeout_ms: 2_000,
+                // Tests that assert a deadline set their own budget. These defaults exist only so
+                // successful sessions are not cut short by a loaded runner, so they are generous.
+                connect_timeout_ms: 10_000,
+                action_timeout_ms: 10_000,
+                idle_timeout_ms: 10_000,
+                close_timeout_ms: 10_000,
+                total_timeout_ms: 30_000,
                 max_frame_bytes: 64 * 1024,
                 max_message_bytes: 128 * 1024,
                 max_inbound_frames: 8,
@@ -2672,7 +2674,7 @@ mod tests {
             },
             WebSocketAction::ExpectText {
                 equals: format!("server-{:016x}", scenario.seed),
-                timeout_ms: Some(1_000),
+                timeout_ms: Some(10_000),
             },
             WebSocketAction::SendBinary {
                 payload_base64: base64::engine::general_purpose::STANDARD
@@ -2687,16 +2689,16 @@ mod tests {
                         .rev()
                         .collect::<Vec<_>>(),
                 ),
-                timeout_ms: Some(1_000),
+                timeout_ms: Some(10_000),
             },
             WebSocketAction::ExpectText {
                 equals: format!("seeded-{:016x}", scenario.seed),
-                timeout_ms: Some(1_000),
+                timeout_ms: Some(10_000),
             },
             WebSocketAction::ExpectClose {
                 codes: vec![1000],
                 reason: Some("oracle-complete".into()),
-                timeout_ms: Some(1_000),
+                timeout_ms: Some(10_000),
             },
         ];
         plan.seal().unwrap()
@@ -3201,7 +3203,7 @@ mod tests {
         tls_plan.actions = vec![WebSocketAction::ExpectClose {
             codes: vec![1000],
             reason: Some("oracle-complete".into()),
-            timeout_ms: Some(1_000),
+            timeout_ms: Some(10_000),
         }];
         let tls_plan = tls_plan.seal().unwrap();
         let mut tls_options = options(&tls_plan);
@@ -3376,7 +3378,7 @@ mod tests {
         let mut total_scenario = generate_websocket_scenario(0x707a1);
         total_scenario.expected_origin = None;
         total_scenario.subprotocol = None;
-        total_scenario.frame_delay_ms = 200;
+        total_scenario.frame_delay_ms = 800;
         total_scenario.steps = vec![
             kahea_test_server::WebSocketOracleStep::SendText {
                 value: "first".into(),
@@ -3398,24 +3400,28 @@ mod tests {
         total_plan
             .required_grants
             .push("net-insecure-websocket".into());
-        total_plan.limits.connect_timeout_ms = 250;
-        total_plan.limits.action_timeout_ms = 250;
-        total_plan.limits.idle_timeout_ms = 250;
-        total_plan.limits.close_timeout_ms = 250;
-        total_plan.limits.total_timeout_ms = 350;
+        // The total deadline is the one under test, and it can only be proven by a wall clock: it
+        // has to expire before two delayed frames arrive. It cannot be given headroom, so every
+        // margin is widened instead — each frame is delayed well inside its own action budget, and
+        // the total budget still expires during the second one.
+        total_plan.limits.connect_timeout_ms = 1_200;
+        total_plan.limits.action_timeout_ms = 1_200;
+        total_plan.limits.idle_timeout_ms = 1_200;
+        total_plan.limits.close_timeout_ms = 1_200;
+        total_plan.limits.total_timeout_ms = 1_400;
         total_plan.actions = vec![
             WebSocketAction::ExpectText {
                 equals: "first".into(),
-                timeout_ms: Some(250),
+                timeout_ms: Some(1_200),
             },
             WebSocketAction::ExpectText {
                 equals: "second".into(),
-                timeout_ms: Some(250),
+                timeout_ms: Some(1_200),
             },
             WebSocketAction::ExpectClose {
                 codes: vec![1000],
                 reason: None,
-                timeout_ms: Some(250),
+                timeout_ms: Some(1_200),
             },
         ];
         let total_plan = total_plan.seal().unwrap();
@@ -3488,7 +3494,7 @@ mod tests {
         plan.actions = vec![WebSocketAction::ExpectClose {
             codes: vec![1000],
             reason: Some("ipv6-complete".into()),
-            timeout_ms: Some(1_000),
+            timeout_ms: Some(10_000),
         }];
         let plan = plan.seal().unwrap();
         let (root, store) = store();

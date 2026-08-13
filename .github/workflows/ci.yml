@@ -36,7 +36,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Without --no-fail-fast the first failing binary hides every later one,
       # which turns a platform difference into several sequential CI rounds.
+      #
+      # RUST_TEST_THREADS caps intra-binary parallelism. Several tests bind loopback
+      # servers and assert that a deadline expires; on a two-core shared runner the
+      # default thread count lets those tests compete for CPU with each other and
+      # expire the wrong deadline. Their budgets are generous now, but the load is
+      # what made a passing suite intermittent, and it costs a re-run every time.
       - run: cargo test --workspace --no-fail-fast
+        env:
+          RUST_TEST_THREADS: 4
 
   dependency-audit:
     runs-on: ubuntu-latest
